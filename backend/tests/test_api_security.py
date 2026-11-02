@@ -142,3 +142,4 @@ def test_primary_evkin_app_keeps_health_public_and_info_protected(monkeypatch):
     assert client.get("/api/info").status_code == 401
     assert client.get("/api/info", headers={API_KEY_HEADER: "wrong"}).status_code == 401
     assert client.get("/api/info", headers={API_KEY_HEADER: "unit-test-key"}).status_code == 200
+    assert client.get("/api/info", cookies={"evkin_local_api_key": "unit-test-key"}).status_code == 200

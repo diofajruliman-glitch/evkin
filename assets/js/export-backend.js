@@ -51,17 +51,36 @@
   const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
   const authenticatedOrigins = new Set();
 
+  function cookieGet() {
+    try {
+      if (typeof document === 'undefined' || !document.cookie) return '';
+      const match = document.cookie.match(/(?:^|;\s*)evkin_local_api_key=([^;]+)/);
+      return match ? decodeURIComponent(match[1]) : '';
+    } catch (_) { return ''; }
+  }
+
   function storageGet() {
-    try { return typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(API_KEY_STORAGE) || '' : ''; }
-    catch (_) { return ''; }
+    try {
+      const sessionVal = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(API_KEY_STORAGE) || '' : '';
+      if (sessionVal) return sessionVal;
+      const localVal = typeof localStorage !== 'undefined' ? localStorage.getItem(API_KEY_STORAGE) || '' : '';
+      if (localVal) return localVal;
+      return cookieGet();
+    }
+    catch (_) { return cookieGet(); }
   }
 
   function storageSet(value) {
     try {
-      if (typeof sessionStorage === 'undefined') return;
-      if (value) sessionStorage.setItem(API_KEY_STORAGE, value);
-      else sessionStorage.removeItem(API_KEY_STORAGE);
-    } catch (_) { /* Session storage may be disabled by browser policy. */ }
+      if (typeof sessionStorage !== 'undefined') {
+        if (value) sessionStorage.setItem(API_KEY_STORAGE, value);
+        else sessionStorage.removeItem(API_KEY_STORAGE);
+      }
+      if (typeof localStorage !== 'undefined') {
+        if (value) localStorage.setItem(API_KEY_STORAGE, value);
+        else localStorage.removeItem(API_KEY_STORAGE);
+      }
+    } catch (_) { /* Storage may be disabled by browser policy. */ }
   }
 
   backend.setApiKey = function (value) {

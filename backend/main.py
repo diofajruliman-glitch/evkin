@@ -65,7 +65,7 @@ def _require_api_key(request: Request):
     expected_key = os.environ.get('EVKIN_API_KEY') or os.environ.get('EVKIN_ANALYTICS_API_KEY')
     if not expected_key:
         return True
-    key = request.headers.get('x-evkin-api-key') or request.headers.get('x-api-key') or request.headers.get('authorization')
+    key = request.headers.get('x-evkin-api-key') or request.headers.get('x-api-key') or request.headers.get('authorization') or request.cookies.get('evkin_local_api_key')
     if key and key.lower().startswith('bearer '):
         key = key.split(' ', 1)[1]
     if key != expected_key:

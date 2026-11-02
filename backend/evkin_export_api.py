@@ -37,7 +37,7 @@ from backend.runtime_guard import (
 )
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
 from backend.workflow_readiness import record_verification
-from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
+from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins, configured_api_key
 from backend.schema_sync import SchemaMismatchError, create_table_from_relation, insert_relation_by_name
 from backend.reset_service import RESET_PROFILES, ResetService
 
@@ -926,7 +926,11 @@ def api_ping() -> dict:
 def serve_frontend() -> FileResponse:
     if not INDEX_FILE.is_file():
         raise HTTPException(status_code=404, detail="Frontend index.html not found")
-    return FileResponse(INDEX_FILE, media_type="text/html; charset=utf-8")
+    response = FileResponse(INDEX_FILE, media_type="text/html; charset=utf-8")
+    key = configured_api_key()
+    if key:
+        response.set_cookie(key="evkin_local_api_key", value=key, samesite="strict", httponly=False)
+    return response
 
 
 @app.get("/api/workflow/health")
@@ -2893,11 +2897,7 @@ def api_retry_job(job_id: str):
         conn.close()
 
 
-@app.get("/")
-def serve_index() -> FileResponse:
-    if not INDEX_FILE.is_file():
-        raise HTTPException(status_code=404, detail="index.html tidak ditemukan di folder aplikasi")
-    return FileResponse(INDEX_FILE, media_type="text/html; charset=utf-8")
+
 
 
 if ASSETS_DIR.is_dir():

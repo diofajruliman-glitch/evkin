@@ -48,6 +48,8 @@ def require_api_key(request: Request) -> None:
     if not expected:
         raise HTTPException(status_code=503, detail="EVKIN API security is not configured")
     supplied = request.headers.get(API_KEY_HEADER, "")
+    if not supplied:
+        supplied = request.cookies.get("evkin_local_api_key", "")
     if not supplied or not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 

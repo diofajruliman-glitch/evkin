@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import threading
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Sequence, Tuple
 
 
@@ -18,6 +19,7 @@ def is_invalidated_duckdb_error(exc: BaseException) -> bool:
         "previous fatal error",
         "must be restarted prior to being used again",
         "connection is closed",
+        "failed to delete all rows from index",
     )
     return any(marker in message for marker in markers)
 
@@ -36,15 +38,26 @@ def _safe_rollback(conn) -> None:
         pass
 
 
-def clear_tables_without_secondary_indexes(conn, tables: Iterable[str]) -> Dict[str, Any]:
-    """Empty tables while temporarily removing their secondary ART indexes.
+def _restore_indexes(conn, indexes) -> None:
+    if not indexes:
+        return
+    conn.execute("BEGIN")
+    try:
+        for _, _, create_sql in indexes:
+            conn.execute(create_sql)
+        conn.commit()
+    except Exception:
+        _safe_rollback(conn)
+        raise
 
-    DuckDB 1.5 can invalidate a database instance when a large DELETE touches an
-    ART index on a wide table ("Failed to delete all rows from index").  Dropping
-    only the user-created secondary indexes before DELETE avoids that engine
-    path.  The index drop must be committed before DELETE: DuckDB otherwise
-    keeps the old ART index alive until commit and triggers the same fatal bug.
-    Index definitions are restored immediately after the data transaction.
+
+@contextmanager
+def temporarily_drop_secondary_indexes(conn, tables: Iterable[str]):
+    """Drop secondary indexes while a caller performs a transactional deletion.
+
+    The caller must begin its transaction inside this context. DuckDB needs the
+    index drops committed before DELETE, while the actual deletes can still be
+    kept atomic by the caller.
     """
     requested = list(dict.fromkeys(str(table) for table in tables))
     for table in requested:
@@ -60,7 +73,8 @@ def clear_tables_without_secondary_indexes(conn, tables: Iterable[str]) -> Dict[
         }
         targets = [table for table in requested if table in existing]
         if not targets:
-            return {"status": "ok", "deleted_tables": {}, "deleted_rows": 0}
+            yield
+            return
 
         placeholders = ",".join("?" for _ in targets)
         index_rows = conn.execute(
@@ -68,46 +82,56 @@ def clear_tables_without_secondary_indexes(conn, tables: Iterable[str]) -> Dict[
             f"WHERE table_name IN ({placeholders}) ORDER BY index_name",
             targets,
         ).fetchall()
-        deleted: Dict[str, int] = {}
-
-        indexes_dropped = False
+        dropped = []
         try:
-            # Phase 1 must commit independently. DuckDB defers an index drop
-            # inside a transaction, so DELETE would still mutate the old ART.
-            for schema_name, index_name, _ in index_rows:
+            for index_row in index_rows:
+                schema_name, index_name, _ = index_row
                 conn.execute(
                     f"DROP INDEX IF EXISTS {_quoted(schema_name)}.{_quoted(index_name)}"
                 )
-            indexes_dropped = True
+                dropped.append(index_row)
+            yield
+        except BaseException as operation_error:
+            _safe_rollback(conn)
+            try:
+                _restore_indexes(conn, dropped)
+            except Exception as restore_error:
+                raise RuntimeError(
+                    f"Operasi reset gagal dan indeks tidak dapat dipulihkan: {restore_error}"
+                ) from operation_error
+            raise
+        else:
+            _restore_indexes(conn, dropped)
 
-            # Phase 2 contains only row deletion and remains all-or-nothing.
-            conn.execute("BEGIN")
-            for table in targets:
-                deleted[table] = int(
-                    conn.execute(f"SELECT COUNT(*) FROM {_quoted(table)}").fetchone()[0]
-                )
-                conn.execute(f"DELETE FROM {_quoted(table)}")
-            conn.commit()
 
-            # Phase 3 rebuilds indexes over empty tables, which is fast and
-            # avoids carrying the problematic index state into the commit.
+def clear_tables_without_secondary_indexes(conn, tables: Iterable[str]) -> Dict[str, Any]:
+    """Empty tables while temporarily removing their secondary ART indexes.
+
+    DuckDB 1.5 can invalidate a database instance when a large DELETE touches an
+    ART index on a wide table ("Failed to delete all rows from index").  Dropping
+    only the user-created secondary indexes before DELETE avoids that engine
+    path.  The index drop must be committed before DELETE: DuckDB otherwise
+    keeps the old ART index alive until commit and triggers the same fatal bug.
+    Index definitions are restored immediately after the data transaction.
+    """
+    requested = list(dict.fromkeys(str(table) for table in tables))
+    deleted: Dict[str, int] = {}
+    with temporarily_drop_secondary_indexes(conn, requested):
+        try:
             conn.execute("BEGIN")
-            for _, _, create_sql in index_rows:
-                conn.execute(create_sql)
+            for table in requested:
+                if conn.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_schema=current_schema() AND table_name=?",
+                    [table],
+                ).fetchone():
+                    deleted[table] = int(
+                        conn.execute(f"SELECT COUNT(*) FROM {_quoted(table)}").fetchone()[0]
+                    )
+                    conn.execute(f"DELETE FROM {_quoted(table)}")
             conn.commit()
         except Exception:
             _safe_rollback(conn)
-            # If the connection is still usable, restore indexes before
-            # returning the original failure. An invalidated DuckDB instance
-            # cannot execute recovery SQL and must simply be restarted.
-            if indexes_dropped:
-                try:
-                    conn.execute("BEGIN")
-                    for _, _, create_sql in index_rows:
-                        conn.execute(create_sql)
-                    conn.commit()
-                except Exception:
-                    _safe_rollback(conn)
             raise
 
         return {

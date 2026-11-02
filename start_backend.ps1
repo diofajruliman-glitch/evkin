@@ -8,6 +8,19 @@ function Get-ListeningConnections([int]$Port) {
         Group-Object OwningProcess | ForEach-Object { $_.Group[0] })
 }
 
+function Get-EvkinBackendProcesses([int]$ExpectedPort, [string]$ExpectedProjectRoot) {
+    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            if ($_.Name -notmatch '^(?i:python)(?:w)?(?:\d+(?:\.\d+)*)?\.exe$') { return $false }
+            if ([string]$_.ExecutablePath -match '(?i)\\WindowsApps\\|PythonManager') { return $false }
+            $commandLine = [string]$_.CommandLine
+            $commandLine -match '(?i)(?:^|\s)-m\s+uvicorn(?:\s|$)' -and
+            $commandLine -match '(?i)(?:^|\s)backend\.evkin_export_api:app(?:\s|$)' -and
+            $commandLine -match "(?i)(?:^|\s)--port(?:=|\s+)`"?$ExpectedPort`"?(?:\s|$)" -and
+            $commandLine.IndexOf($ExpectedProjectRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        })
+}
+
 function Wait-ListeningPortFree([int]$Port, [int]$TimeoutMilliseconds) {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     do {
@@ -33,6 +46,8 @@ function Test-EvkinBackendProcess($Connection, $ProcessInfo, [int]$ExpectedPort,
 }
 
 if (-not $env:EVKIN_DUCKDB_PATH) { $env:EVKIN_DUCKDB_PATH = Join-Path $projectRoot 'backend\data\EVKIN_MASTER.duckdb' }
+if (-not $env:EVKIN_IMPORT_AUTHORITY) { $env:EVKIN_IMPORT_AUTHORITY = 'IMPORT_BACKEND_V1' }
+$env:EVKIN_CSV_EABSENSI_SPECIAL_ENABLED = 'true'
 $port = if ($env:EVKIN_HTTP_PORT) { [int]$env:EVKIN_HTTP_PORT } else { 8000 }
 $env:EVKIN_HTTP_PORT = [string]$port
 $url = "http://127.0.0.1:$port"
@@ -41,6 +56,17 @@ $owned = $false
 try {
     try { $owned = $mutex.WaitOne(30000) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
     if (-not $owned) { throw 'Launcher lain masih berjalan. Coba kembali.' }
+
+    # A duplicate backend can fail to bind the port but still keep DuckDB open.
+    # Remove only matching EVKIN processes for this project and port.
+    $matchingProcesses = @(Get-EvkinBackendProcesses $port $projectRoot)
+    foreach ($processInfo in $matchingProcesses) {
+        $processId = [int]$processInfo.ProcessId
+        if ($processId -ne $PID) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($matchingProcesses.Count -gt 0) { Start-Sleep -Milliseconds 500 }
 
     $listeners = @(Get-ListeningConnections $port)
     if ($listeners.Count -gt 0) {
@@ -128,7 +154,13 @@ try {
         try { $info = Invoke-RestMethod "$url/api/info" -Headers $apiHeaders -TimeoutSec 1; break } catch {}
     }
     if (-not $info) { throw "Backend belum siap. Lihat log: $stderr. Jangan menjalankan server duplikat." }
+    $importAuthority = Invoke-RestMethod "$url/api/absence-import/authority" -Headers $apiHeaders -TimeoutSec 3
+    if (-not $importAuthority.csv_eabsensi_enabled -or
+        $importAuthority.routes.csv_eabsensi -ne 'CSV_EABSENSI_SPECIAL') {
+        throw 'Backend aktif, tetapi jalur CSV eAbsensi belum aktif. Periksa log backend dan konfigurasi import.'
+    }
     Write-Host "Backend siap: $url"
+    Write-Host 'Import CSV eAbsensi aktif.'
 
     if ($OpenBrowser) {
         $browserUrl = "$url/#evkin-api-key=$([uri]::EscapeDataString($apiKey))"

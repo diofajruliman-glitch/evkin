@@ -7,9 +7,9 @@ async function main() {
   let fail = false;
   const E = {};
   vm.runInNewContext(fs.readFileSync('assets/js/export-backend.js', 'utf8'), {
-    window: {EVKIN:E}, URL, AbortSignal, TextEncoder, crypto:webcrypto, console,
+    window: {EVKIN:E}, URL, AbortSignal, TextEncoder, Blob, crypto:webcrypto, console,
     fetch: async (url, options) => {
-      requests.push({url:String(url), body:JSON.parse(options.body)});
+      requests.push({url:String(url), body:JSON.parse(options.body instanceof Blob ? await options.body.text() : options.body)});
       return {ok:!fail, json:async()=>({status:'ok'}), text:async()=> 'Database unavailable'};
     }
   });
@@ -41,6 +41,17 @@ async function main() {
   const input={raw_import:[{nip:'FIRST'}]};const write=backend.syncWorkflow(input);
   input.raw_import[0].nip='LATER';release();await write;
   assert.equal(requests.at(-1).body.raw_import[0].nip,'FIRST');
+  const unusual={config:{note:'Cuti "pegawai"\\\n雪 😀',optional:undefined},
+    daily_data:[{nip:'00001',flags:['Lintas hari'],optional:undefined},undefined,null,{totalHarian:NaN}],
+    rekap_sdm:[],optional:undefined};
+  await backend.syncWorkflow(unusual);
+  assert.deepEqual(requests.at(-1).body,JSON.parse(JSON.stringify(unusual)),
+    'Blob JSON must preserve escaped/Unicode values, nulls and omitted optional fields');
+  const cyclic={};cyclic.self=cyclic;
+  const beforeInvalid=requests.length;
+  await assert.rejects(backend.syncWorkflow({daily_data:[cyclic]}),/circular/i);
+  assert.equal(requests.length,beforeInvalid,'Invalid snapshots must never start a partial write');
+  await backend.syncWorkflow(data);
   const chunkRows=Array.from({length:15001},(_,i)=>({nip:String(i),tanggal:'2026-08-01'}));
   const beforeChunks=requests.length;
   await backend.syncTableChunks('raw_import',chunkRows,{chunkSize:7500});

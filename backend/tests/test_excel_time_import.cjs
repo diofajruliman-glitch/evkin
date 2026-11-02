@@ -1,8 +1,18 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
+const XLSX = require('../../assets/vendor/xlsx.full.min.js');
+
+class FakeFileReader {
+  readAsArrayBuffer(file) {
+    const bytes = file.bytes;
+    const value = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    queueMicrotask(() => this.onload({target:{result:value}}));
+  }
+}
 
 async function main() {
+  const materialRows = rows => JSON.parse(JSON.stringify(rows)).map(({_id, ...row}) => row);
   const E = {
     state: { month: '2026-08', data: [], daily: [] },
     util: {},
@@ -18,9 +28,13 @@ async function main() {
     exportBackend: { enabled: false }
   };
 
-  const sandbox = { window: { EVKIN: E }, console, Date, Math, setTimeout, clearTimeout };
+  const sandbox = {
+    window: { EVKIN: E }, console, Date, Math, setTimeout, clearTimeout,
+    queueMicrotask, FileReader:FakeFileReader, XLSX
+  };
   vm.runInNewContext(fs.readFileSync('assets/js/utils.js', 'utf8'), sandbox);
   vm.runInNewContext(fs.readFileSync('assets/js/import.js', 'utf8'), sandbox);
+  vm.runInNewContext(fs.readFileSync('assets/js/import-wali.js', 'utf8'), sandbox);
 
   const U = E.util;
   const mod = E.importMod;
@@ -80,7 +94,39 @@ async function main() {
   assert.equal(fixtureStats.totalRecord, 600);
   assert.equal(fixtureStats.totalRaw, 600);
 
-  console.log('Excel time normalization and import fixture (>500 rows): PASS');
+  const representativeRows = fixtureRows.slice(0, 7);
+  await mod.process(representativeRows);
+  const directResult = materialRows(E.state.data);
+  const worksheet = XLSX.utils.aoa_to_sheet(representativeRows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Absensi');
+  const excelBytes = XLSX.write(workbook, {bookType:'xlsx', type:'buffer'});
+  const fileStats = await mod.processFile({name:'absensi-representative.xlsx', bytes:excelBytes});
+  const fileResult = materialRows(E.state.data);
+  assert.equal(fileStats.totalRecord, representativeRows.length - 1);
+  assert.deepEqual(fileResult, directResult, 'Legacy processFile XLSX result must equal the frozen legacy row engine');
+
+  const waliFixture = JSON.parse(fs.readFileSync(
+    'backend/tests/fixtures/absence_wali_golden_cases_2026_09.json', 'utf8'
+  ));
+  const waliAoa = [waliFixture.headers, ...waliFixture.rows];
+  await E.waliImportMod.processAoa(waliAoa);
+  const directWali = materialRows(E.state.data);
+  const waliSheet = XLSX.utils.aoa_to_sheet(waliAoa);
+  const waliWorkbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(waliWorkbook, waliSheet, 'Absensi Wali');
+  const waliBytes = XLSX.write(waliWorkbook, {bookType:'xlsx', type:'buffer'});
+  const waliStats = await E.waliImportMod.processFile({name:'absensi-wali-representative.xlsx', bytes:waliBytes});
+  const fileWali = materialRows(E.state.data);
+  assert.deepEqual(fileWali, directWali, 'Legacy Wali XLSX result must equal the frozen pairing engine');
+  assert.equal(E.state.importMode, 'wali');
+  assert.equal(waliStats.crossDay, fileWali.filter(row => row.crossDay).length);
+  assert.ok(fileWali.some(row => row.nip === 'N2' && row.tanggal.key === '2026-08-04' &&
+    row.masukMin === 1200 && row.pulangMin === 360 && row.crossDay));
+  assert.ok(fileWali.some(row => row.nip === 'N9' && row.tanggal.key === '2026-12-31' &&
+    row.tanggalPulangObj.key === '2027-01-01' && row.crossDay));
+
+  console.log('Excel normalization, full XLSX processFile, and frozen Wali/cross-day pairing: PASS');
 }
 
 main().catch((error) => {

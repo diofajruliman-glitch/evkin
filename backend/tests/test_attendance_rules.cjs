@@ -21,6 +21,24 @@ async function main() {
   assert.equal(calc('2026-08-02',{masukMin:null,pulangMin:null}).totalHarian,0);
   assert.equal(calc('2026-08-17',{pulangMin:null}).totalHarian,0);
   assert.equal(calc('2026-08-03',{pulangMin:null}).totalHarian,3);
+  // Cross-day checkout is evaluated on the next-day timeline, so an early
+  // morning checkout is not mistaken for leaving before the same-day schedule.
+  const crossDay = calc('2026-08-03',{masukMin:1200,pulangMin:240,crossDay:true});
+  assert.equal(crossDay.potPulangCepat,0);
+  assert.equal(crossDay.potKeterlambatan,0);
+  assert.equal(crossDay.totalHarian,0);
+  assert.equal(crossDay.statusLengkap,'Lengkap');
+  assert.equal(crossDay.statusAbsensi,'LINTAS_HARI');
+  assert.equal(crossDay.durasiMin,480);
+  assert.ok(crossDay.flags.includes('PULANG HARI BERIKUTNYA'));
+  const shortShift = calc('2026-08-03',{jabatan:'Wali Asuh',masukMin:1380,pulangMin:60,crossDay:true});
+  assert.equal(shortShift.durasiMin,120);
+  assert.equal(shortShift.totalHarian,0);
+  assert.equal(shortShift.potDurasi,0);
+  assert.equal(calc('2026-08-03',{crossDay:true,pulangMin:null}).potTidakLengkap,3);
+  assert.equal(calc('2026-08-03',{crossDay:true,masukMin:null,pulangMin:240}).potTidakLengkap,3);
+  assert.equal(calc('2026-08-03',{masukMin:1200,pulangMin:1320}).potKeterlambatan,3);
+  assert.equal(calc('2026-08-03',{jabatan:'Wali Asuh',masukMin:480,pulangMin:600}).potDurasi,3);
   E.state.semifinalVerified=true;
   E.state.daily=[calc('2026-08-03',{jabatan:'Wali Asuh'}),
     calc('2026-08-04',{jabatan:'Wali Asuh',masukMin:null,pulangMin:null,jenis:'Cuti Tahunan'})];

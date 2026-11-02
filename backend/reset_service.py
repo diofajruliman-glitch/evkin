@@ -12,6 +12,16 @@ from typing import Iterable
 
 import duckdb
 
+from backend.duckdb_maintenance import (
+    is_invalidated_duckdb_error,
+    temporarily_drop_secondary_indexes,
+)
+from backend.runtime_guard import (
+    begin_runtime_reset,
+    finish_runtime_reset,
+    initialize_runtime_state,
+)
+
 
 def quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -30,8 +40,9 @@ MODULE_PROTECTED_TABLES = frozenset({
     'sdm_master', 'sdm_assignment_history', 'sdm_tukin_profile_history', 'sdm_bank_history',
     'sdm_temporary_assignment_history', 'sdm_change_request', 'sdm_active_history',
     'sdm_validation_issue', 'sdm_master_import_batch', 'skp_rule_config', 'master_skp_rules',
-    'audit_log', 'application_reset_audit', 'final_tukin_schema',
+    'audit_log', 'application_reset_audit', 'final_tukin_schema', 'system_runtime_state',
     'skp_assessment_audit', 'skp_indicator_config', 'skp_indicator_config_audit',
+    'skp_assessment_rule', 'skp_assessment_rule_audit', 'skp_non_submission_rule',
     'skp_condition_decision_audit', 'tukin_period_audit', 'tukin_admin_audit',
     'pengembalian_tukin', 'pengembalian_uang_makan', 'rekap_pengembalian', 'rekonsiliasi',
     'bnba', 'pengembalian_period', 'pengembalian_archive_dataset',
@@ -41,7 +52,7 @@ MODULE_PROTECTED_TABLES = frozenset({
     'pengembalian_master_obligation', 'pengembalian_period_audit',
 })
 
-_PRESERVE_MODULES = "Master SDM, Master Pengembalian, konfigurasi aturan, dan audit tetap disimpan."
+_PRESERVE_MODULES = "Master SDM, konfigurasi aturan, dan audit tetap disimpan."
 
 RESET_PROFILES = {
     'workflow': ResetSpec(
@@ -55,13 +66,13 @@ RESET_PROFILES = {
         'workflow_results',
         ('final_absensi', 'anomali', 'rekap_sdm', 'hitung_harian'),
         'RESET WORKFLOW RESULTS',
-        "Data sumber, konfigurasi workflow, Master SDM, dan Master Pengembalian tetap disimpan.",
+        "Data sumber, konfigurasi workflow, dan Master SDM tetap disimpan.",
     ),
     'skp': ResetSpec(
         'skp',
         ('skp_meeting_member', 'skp_meeting_batch', 'skp_assessment_exception',
          'skp_condition_decision', 'skp_results', 'skp_assessment_monthly',
-         'skp_import_source', 'skp_import_batch', 'skp_import_batches'),
+         'skp_period_finalization', 'skp_import_source', 'skp_import_batch', 'skp_import_batches'),
         'RESET SKP', _PRESERVE_MODULES,
     ),
     'final_tukin': ResetSpec(
@@ -81,8 +92,24 @@ OPERATIONAL_CONFIRMATION = 'RESET TOTAL TANPA MASTER SDM'
 OPERATIONAL_PRESERVED = {
     'master_data', 'master_sdm', 'master_unit_kerja', 'master_jabatan',
     'master_skp_rules', 'final_tukin_schema', 'master_tukin', 'skp_rule_config',
-    'audit_log', 'application_reset_audit',
+    'audit_log', 'application_reset_audit', 'system_runtime_state',
 }
+
+# Operational reset uses an explicit, auditable precedence.  Prefix matching is
+# deliberately last: audit/history tables often share an operational prefix
+# (for example ``skp_assessment_audit``) but are evidence, not working data.
+PRESERVE_MASTER = frozenset({
+    'master_data', 'master_sdm', 'master_unit_kerja', 'master_jabatan',
+    'master_tukin', 'master_skp_rules', 'skp_rule_config', 'final_tukin_schema',
+    'skp_indicator_config', 'skp_assessment_rule', 'skp_non_submission_rule',
+    'pengembalian_master_obligation',
+})
+PRESERVE_AUDIT = frozenset({
+    'audit_log', 'application_reset_audit', 'skp_assessment_audit',
+    'skp_indicator_config_audit', 'skp_condition_decision_audit',
+    'skp_assessment_rule_audit',
+    'tukin_period_audit', 'tukin_admin_audit', 'pengembalian_period_audit',
+})
 OPERATIONAL_TABLES = {
     'raw_import', 'hitung_harian', 'rekap_sdm', 'anomali', 'bnba',
     'rekonsiliasi', 'import_batch', 'processing_jobs', 'rounding_jobs',
@@ -119,15 +146,26 @@ class ResetService:
     def _token(plan: dict) -> str:
         stable = {
             'profile': plan['profile'],
-            'tables': plan['tables'],
+            # Runtime status/generation necessarily changes when the reset
+            # fence is entered and is protected from deletion. It must not
+            # invalidate the user's already-verified destructive plan.
+            'tables': [item for item in plan['tables']
+                       if item.get('table') != 'system_runtime_state'],
             'blockers': plan.get('blockers', []),
         }
         return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
 
     @staticmethod
-    def _preserve_operational(name: str) -> bool:
-        return (name in OPERATIONAL_PRESERVED or name.startswith('sdm_')
-                or name.startswith('schema_migration'))
+    def _operational_category(name: str) -> str:
+        if (name in PRESERVE_AUDIT or name.endswith('_audit')
+                or name.startswith('audit_')):
+            return 'PRESERVE_AUDIT'
+        if (name in PRESERVE_MASTER or name in OPERATIONAL_PRESERVED
+                or name.startswith('sdm_') or name.startswith('schema_migration')):
+            return 'PRESERVE_MASTER'
+        if name in OPERATIONAL_TABLES or name.startswith(OPERATIONAL_PREFIXES):
+            return 'DELETE_OPERATIONAL'
+        return 'UNKNOWN'
 
     def _fixed_plan(self, conn, profile: str) -> dict:
         spec = RESET_PROFILES.get(profile)
@@ -163,12 +201,13 @@ class ResetService:
                ORDER BY table_schema,table_name"""
         ).fetchall():
             count, digest = self._digest(conn, schema, name)
-            action = ('KEEP' if self._preserve_operational(name)
-                      else 'DELETE' if schema == 'main' and
-                      (name in OPERATIONAL_TABLES or name.startswith(OPERATIONAL_PREFIXES))
+            category = self._operational_category(name) if schema == 'main' else 'UNKNOWN'
+            action = ('KEEP' if category.startswith('PRESERVE_')
+                      else 'DELETE' if category == 'DELETE_OPERATIONAL'
                       else 'UNKNOWN')
             result.append({'schema': schema, 'table': name, 'rows': count,
-                           'digest': digest, 'action': action, 'exists': True})
+                           'digest': digest, 'action': action, 'category': category,
+                           'exists': True})
         return result
 
     def _operational_blockers(self, conn, inventory: list[dict]) -> list[str]:
@@ -229,6 +268,7 @@ class ResetService:
     def preview(self, profile: str) -> dict:
         if not self.db_path.is_file():
             raise ValueError('Database aplikasi tidak ditemukan')
+        initialize_runtime_state(self.db_path)
         with duckdb.connect(str(self.db_path)) as conn:
             return self._plan(conn, profile)
 
@@ -254,10 +294,24 @@ class ResetService:
         conn.execute(f"DELETE FROM {quote(item['schema'])}.{quote(item['table'])}")
 
     @staticmethod
-    def _snapshot(conn, tables: Iterable[str]) -> dict[str, tuple[int, str]]:
+    def _snapshot(conn, tables: Iterable[str]) -> dict[str, tuple[int, str, str]]:
         existing = ResetService._existing(conn)
-        return {table: ResetService._digest(conn, 'main', table)
-                for table in tables if table in existing}
+        snapshots = {}
+        for table in tables:
+            if table not in existing:
+                continue
+            columns = conn.execute(
+                "SELECT column_name,data_type,is_nullable,column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema='main' AND table_name=? ORDER BY ordinal_position",
+                [table],
+            ).fetchall()
+            schema_digest = hashlib.sha256(
+                json.dumps(columns, default=str, separators=(',', ':')).encode()
+            ).hexdigest()
+            count, row_digest = ResetService._digest(conn, 'main', table)
+            snapshots[table] = (count, row_digest, schema_digest)
+        return snapshots
 
     @staticmethod
     def _write_audit(conn, reset_id: str, actor: str, reason: str,
@@ -272,6 +326,36 @@ class ResetService:
         )
 
     def execute(self, profile: str, payload: dict, *, source: str = 'API') -> dict:
+        """Run every destructive reset behind the same persistent generation fence.
+
+        A failed/rolled-back reset still advances generation. This deliberately
+        invalidates clients that overlapped the attempt, while READY is restored
+        in ``finally`` so normal writes cannot remain permanently blocked.
+        """
+        payload = payload or {}
+        initialize_runtime_state(self.db_path)
+        with duckdb.connect(str(self.db_path)) as conn:
+            plan = self._plan(conn, profile)
+            actor = str(payload.get('actor') or '').strip()
+            reason = str(payload.get('reason') or '').strip()
+            if profile == 'operational' and (not actor or not reason):
+                raise ValueError('Frasa konfirmasi, nama petugas, dan alasan reset wajib diisi')
+            if payload.get('confirmation') != plan['confirmation']:
+                raise ValueError('Konfirmasi reset tidak sesuai')
+            if payload.get('preview_token') != plan['preview_token']:
+                raise ValueError('Data berubah atau preview belum dilakukan. Preview ulang sebelum reset')
+            if plan['blockers']:
+                raise ValueError('; '.join(plan['blockers']))
+
+        generation = begin_runtime_reset(self.db_path)
+        try:
+            result = self._execute_fenced(profile, payload, source=source)
+            result['reset_generation'] = generation
+            return result
+        finally:
+            finish_runtime_reset(self.db_path)
+
+    def _execute_fenced(self, profile: str, payload: dict, *, source: str = 'API') -> dict:
         payload = payload or {}
         actor = str(payload.get('actor') or '').strip()
         reason = str(payload.get('reason') or '').strip()
@@ -299,40 +383,55 @@ class ResetService:
                     json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
                 )
 
-            protected_before = (self._snapshot(
-                                    conn, MODULE_PROTECTED_TABLES - {'application_reset_audit'}
-                                )
-                                if profile != 'operational' else {})
-            conn.execute('BEGIN TRANSACTION')
-            try:
-                current = self._plan(conn, profile)
-                if current['preview_token'] != plan['preview_token']:
-                    raise ValueError('Data berubah setelah preview; reset dibatalkan')
-                deleted = {}
-                for item in plan['tables']:
-                    if item['action'] == 'DELETE' and item.get('exists', True):
-                        self._delete_table(conn, item)
-                        deleted[item['table']] = item['rows']
-                    elif item['action'] == 'DELETE':
-                        deleted[item['table']] = 0
-                audit_payload = {
-                    'profile': profile, 'source': source, 'deleted': deleted,
-                    'deleted_rows': sum(deleted.values()), 'target_tables': plan['target_tables'],
-                }
-                self._write_audit(conn, reset_id, actor, reason, backup_path, audit_payload)
+            # Runtime generation/status and the reset audit are expected to
+            # change. Every other protected table must retain both its complete
+            # row multiset and schema through the destructive transaction.
+            dynamic_protected = {'application_reset_audit', 'system_runtime_state'}
+            protected_tables = (
+                {item['table'] for item in plan['tables'] if item['action'] == 'KEEP'}
+                if profile == 'operational'
+                else set(MODULE_PROTECTED_TABLES)
+            ) - dynamic_protected
+            protected_before = self._snapshot(conn, protected_tables)
+            target_tables = [
+                item['table'] for item in plan['tables']
+                if item['action'] == 'DELETE' and item.get('exists', True)
+            ]
+            with temporarily_drop_secondary_indexes(conn, target_tables):
+                conn.execute('BEGIN TRANSACTION')
+                try:
+                    current = self._plan(conn, profile)
+                    if current['preview_token'] != plan['preview_token']:
+                        raise ValueError('Data berubah setelah preview; reset dibatalkan')
+                    deleted = {}
+                    for item in plan['tables']:
+                        if item['action'] == 'DELETE' and item.get('exists', True):
+                            self._delete_table(conn, item)
+                            deleted[item['table']] = item['rows']
+                        elif item['action'] == 'DELETE':
+                            deleted[item['table']] = 0
+                    audit_payload = {
+                        'profile': profile, 'source': source, 'deleted': deleted,
+                        'deleted_rows': sum(deleted.values()), 'target_tables': plan['target_tables'],
+                    }
+                    self._write_audit(conn, reset_id, actor, reason, backup_path, audit_payload)
 
-                for item in plan['tables']:
-                    if item['action'] == 'DELETE' and item.get('exists', True):
-                        if conn.execute(
-                            f"SELECT count(*) FROM {quote(item['schema'])}.{quote(item['table'])}"
-                        ).fetchone()[0]:
-                            raise ValueError(f"Verifikasi penghapusan gagal: {item['table']}")
-                if profile != 'operational' and self._snapshot(conn, protected_before) != protected_before:
-                    raise ValueError('Verifikasi pelestarian Master/audit gagal')
-                conn.execute('COMMIT')
-            except Exception:
-                conn.execute('ROLLBACK')
-                raise
+                    for item in plan['tables']:
+                        if item['action'] == 'DELETE' and item.get('exists', True):
+                            if conn.execute(
+                                f"SELECT count(*) FROM {quote(item['schema'])}.{quote(item['table'])}"
+                            ).fetchone()[0]:
+                                raise ValueError(f"Verifikasi penghapusan gagal: {item['table']}")
+                    if self._snapshot(conn, protected_before) != protected_before:
+                        raise ValueError('Verifikasi pelestarian Master/audit gagal')
+                    conn.execute('COMMIT')
+                except Exception as exc:
+                    try:
+                        conn.execute('ROLLBACK')
+                    except duckdb.Error as rollback_error:
+                        if not is_invalidated_duckdb_error(rollback_error):
+                            raise rollback_error from exc
+                    raise
         return {
             'status': 'ok', 'reset_id': reset_id, 'profile': profile, 'module': profile,
             'deleted': deleted, 'deleted_rows': sum(deleted.values()),

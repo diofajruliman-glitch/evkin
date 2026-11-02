@@ -28,9 +28,8 @@
   };
 
   C.resolveJabatan = function (rec, ctx) {
-    const peg = ctx.pegByNip[String(rec.nip).trim()];
-    let jab = (peg && peg.jabatan) ? peg.jabatan : (rec.jabatan || '');
-    jab = String(jab || '').trim();
+    // Attendance job belongs to the imported workbook, not the SDM master.
+    const jab = String(rec.jabatan || '').trim();
     return jab || 'Belum Ditentukan';
   };
 
@@ -127,7 +126,13 @@
       res.flags.push('ABSEN_DI_LUAR_JADWAL');
     }
 
-    const dur = U.durationMin(t.masuk, t.pulang);
+    // For cross-day punches, compare the actual elapsed clock times. A
+    // next-day checkout such as 04:00 is 28 hours on the attendance timeline,
+    // not 04:00 on the same day as the 07:30 check-in.
+    const actualPulang = rec.crossDay && t.pulang !== null ? t.pulang + 1440 : t.pulang;
+    const dur = rec.crossDay && t.masuk !== null && actualPulang !== null
+      ? Math.max(0, actualPulang - t.masuk)
+      : U.durationMin(t.masuk, t.pulang);
     res.durasiMin = dur;
     res.durasi = dur === null ? '' : U.fmtDur(dur);
 
@@ -170,6 +175,14 @@
     res.statusLengkap = 'Lengkap';
     if (isWali) res.statusAbsensi = rec.crossDay ? 'LINTAS_HARI' : 'NORMAL';
 
+    // Complete next-day attendance is accepted without a daily deduction.
+    // Check completeness first: a next-day date alone cannot excuse a missing punch.
+    if (rec.crossDay) {
+      res.statusAbsensi = 'LINTAS_HARI';
+      if (metode === 'reguler') { res._lateMin = 0; res._earlyMin = 0; }
+      return res;
+    }
+
     if (metode === 'durasi') {
       // METODE DURASI AKTUAL (shift hanya flag)
       res.potDurasi = isOffSchedule ? 0 : C.durasiTierPct(dur / 60, cfg);
@@ -183,7 +196,9 @@
         const pulangStd = U.parseTime(jd.pulang);
 
         let lateMin = Math.max(0, t.masuk - masukStd);
-        let earlyMin = Math.max(0, pulangStd - t.pulang);
+        let earlyMin = rec.crossDay
+          ? Math.max(0, pulangStd - actualPulang)
+          : Math.max(0, pulangStd - t.pulang);
 
         // FLEXI TIME
         const fx = cfg.flexi;

@@ -65,13 +65,22 @@
     }
   }
 
+  function hasMeaningfulValue(value) {
+    return value !== null && value !== undefined && String(value).trim() !== '';
+  }
+
   mod.processSingleRow = function processSingleRow(r, headers, colMap, options) {
     options = options || {};
     const get = (f) => (colMap[f] !== undefined ? r[colMap[f]] : '');
     const rawObj = {};
     headers.forEach((h, i) => {
       const key = h || ('Kolom' + (i + 1));
-      if (!IGNORED_IMPORT_HEADERS.has(norm(key))) rawObj[key] = r[i];
+      const cellValue = r[i];
+      if (!IGNORED_IMPORT_HEADERS.has(norm(key))) {
+        if (["jammasuk", "jamdatang", "absenpagi", "in"].includes(norm(key))) rawObj[key] = U.normalizeExcelTime(cellValue);
+        else if (["jampulang", "checkout", "jamout", "scanpulang", "waktupulang", "jamkeluar", "absensore", "out"].includes(norm(key))) rawObj[key] = U.normalizeExcelTime(cellValue);
+        else rawObj[key] = cellValue;
+      }
     });
 
     const nip = String(get('nip') || '').trim();
@@ -79,8 +88,10 @@
     const jabatan = String(get('jabatan') || '').trim();
     const dObj = U.parseDate(get('tanggal')) || U.parseDate(get('tanggalPulang'));
     const dPulang = colMap.tanggalPulang !== undefined ? U.parseDate(get('tanggalPulang')) : null;
-    const masukMin = U.parseTime(get('jamMasuk'));
-    const pulangMin = U.parseTime(get('jamPulang'));
+    const masukValue = U.normalizeExcelTime(get('jamMasuk'));
+    const pulangValue = U.normalizeExcelTime(get('jamPulang'));
+    const masukMin = U.parseTime(masukValue);
+    const pulangMin = U.parseTime(pulangValue);
     const provinsi = String(get('provinsi') || '').trim();
     const kabupaten = String(get('kabupaten') || '').trim();
     const zona = M.detectZone(provinsi, get('zona'));
@@ -89,8 +100,8 @@
     const issues = [];
     if (!nip) issues.push('NIP kosong');
     if (!dObj) issues.push('Tanggal tidak valid');
-    if (get('jamMasuk') !== '' && masukMin === null) issues.push('Jam masuk tidak valid');
-    if (get('jamPulang') !== '' && pulangMin === null) issues.push('Jam pulang tidak valid');
+    if (hasMeaningfulValue(get('jamMasuk')) && masukMin === null) issues.push('Jam masuk tidak valid');
+    if (hasMeaningfulValue(get('jamPulang')) && pulangMin === null) issues.push('Jam pulang tidak valid');
     if (!options.partial) {
       if (masukMin === null) issues.push('Jam masuk kosong');
       if (pulangMin === null) issues.push('Jam pulang kosong');
@@ -118,6 +129,8 @@
         tanggal: dObj,
         tanggalPulang: dPulang ? dPulang.str : '',
         hari: String(get('hari') || '').trim() || U.dayName(dObj),
+        masukRaw: masukValue,
+        pulangRaw: pulangValue,
         masukMin, pulangMin,
         masukNormMin: wrap(masukMin), pulangNormMin: wrap(pulangMin),
         masukNormMinAdd: wrapAdd(masukMin), pulangNormMinAdd: wrapAdd(pulangMin),
@@ -267,16 +280,24 @@
     if (mod.saving) throw new Error('Penyimpanan impor masih berjalan.');
     mod.saving = true;
     try {
+      const workflowId = `import-${Date.now().toString(36)}-${U.uid()}`;
+      S.workflowMeta = {...(S.workflowMeta || {}), workflow_id:workflowId,
+        periode:stats.months[0] || null, status:'IMPORTING'};
       S.rawHeaders = headers; S.raw = raw; S.data = data;
       S.workflowLoadError = '';
-      S.importStats = stats; S.importMode = importMode || 'standard';
+      S.importStats = {...stats, workflow_id:workflowId}; S.importMode = importMode || 'standard';
       if (!stats.months.includes(S.month)) S.month = stats.months[0] || '';
       EVKIN.invalidateFrom('import', {save:false});
-      await EVKIN.syncBackendWorkflow();
+      if (typeof EVKIN.syncImportedWorkflow === 'function') await EVKIN.syncImportedWorkflow();
+      else await EVKIN.syncBackendWorkflow();
+      S.workflowMeta.status = 'ACTIVE';
       EVKIN.auditMod.logDataImport(data.length, S.month);
       return stats;
     } catch (error) {
-      S.workflowLoadError = 'Impor belum tersimpan lengkap. Impor ulang file sumber: ' + error.message;
+      if (S.workflowMeta) S.workflowMeta.status = 'ERROR';
+      const message = error && error.message ? error.message :
+        (error && typeof error === 'object' ? JSON.stringify(error) : String(error || 'Kesalahan import tidak diketahui.'));
+      S.workflowLoadError = 'Impor belum tersimpan lengkap. Impor ulang file sumber: ' + message;
       throw error;
     } finally { mod.saving = false; }
   };
@@ -489,10 +510,12 @@
           EVKIN.go('import');
         })
         .catch((ex) => {
+          const message = ex && ex.message ? ex.message :
+            (ex && typeof ex === 'object' ? JSON.stringify(ex) : String(ex || 'Kesalahan import tidak diketahui.'));
           setImportProgress(false);
-          if (EVKIN.progress) EVKIN.progress({ title: 'Import Data gagal', message: ex.message, state: 'error' });
+          if (EVKIN.progress) EVKIN.progress({ title: 'Import Data gagal', message, state: 'error' });
           if (pickBtn) pickBtn.disabled = false;
-          msg.innerHTML = '<div class="alert error">' + U.esc(ex.message) + '</div>';
+          msg.innerHTML = '<div class="alert error">' + U.esc(message) + '</div>';
         });
     }
 
@@ -515,9 +538,11 @@
           EVKIN.go('import');
         })
         .catch((error) => {
+          const message = error && error.message ? error.message :
+            (error && typeof error === 'object' ? JSON.stringify(error) : String(error || 'Kesalahan import tidak diketahui.'));
           setImportProgress(false);
-          if (EVKIN.progress) EVKIN.progress({ title: label + ' gagal', message: error.message, state: 'error' });
-          msg.innerHTML = '<div class="alert error">' + U.esc(error.message) + '</div>';
+          if (EVKIN.progress) EVKIN.progress({ title: label + ' gagal', message, state: 'error' });
+          msg.innerHTML = '<div class="alert error">' + U.esc(message) + '</div>';
         });
     }
   };
@@ -553,10 +578,17 @@
     const head = ['NIP', 'Nama', 'Tanggal', 'Hari', 'Jam Masuk', 'Jam Pulang', 'Zona', 'Provinsi', 'Jenis', 'Lintas Hari', 'Masalah'];
     const body = rows.map(d => `<tr class="${d.dupFlag ? 'row-dup' : ''} ${d.issues.length ? 'row-issue' : ''}">
       <td>${U.esc(d.nip)}</td><td>${U.esc(d.nama)}</td><td>${U.esc(d.tanggal.str)}</td><td>${U.esc(d.hari)}</td>
-      <td>${U.esc(U.fmtTime(d.masukMin))}</td><td>${U.esc(U.fmtTime(d.pulangMin))}</td><td>${U.esc(d.zona)}</td>
+      <td>${U.esc(d.masukRaw || U.fmtTime(d.masukMin))}</td><td>${U.esc(d.pulangRaw || U.fmtTime(d.pulangMin))}</td><td>${U.esc(d.zona)}</td>
       <td>${U.esc(d.provinsi)}</td><td>${U.esc(d.jenis)}</td><td>${d.crossDay ? '✔' : ''}</td>
      <td class="err">${U.esc((d.issues || []).join('; '))}</td></tr>`).join('');
+    const exampleRows = [
+      ['0.288263888888889', '06:55:06'],
+      ['0.827013888888889', '19:50:54'],
+      ['0.5', '12:00:00']
+    ].map(([raw, canonical]) => `<tr><td>${U.esc(raw)}</td><td>${U.esc(canonical)}</td></tr>`).join('');
     return `<div class="card"><h3>Preview Data <span class="muted">(maks 100 baris dari ${S.data.length})</span></h3>
-      <div class="table-wrap"><table class="data-table" data-testid="import-preview-table"><thead><tr>${head.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>${body}</tbody></table></div></div>`;
+      <div class="table-wrap"><table class="data-table" data-testid="import-preview-table"><thead><tr>${head.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>${body}</tbody></table></div></div>
+      <div class="card"><h3>Preview Normalisasi Excel Time</h3>
+        <div class="table-wrap"><table class="data-table" data-testid="excel-time-preview-table"><thead><tr><th>Input Excel</th><th>Canonical</th></tr></thead><tbody>${exampleRows}</tbody></table></div></div>`;
   }
 })();

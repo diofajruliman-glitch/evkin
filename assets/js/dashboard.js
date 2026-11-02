@@ -54,11 +54,12 @@
               </p>
             </div>
             <div class="dashboard-tools">
+              <button class="btn btn-primary btn-sm" id="gotoTukinBtn" title="Buka Pengelolaan Tukin (70/30)"><i data-lucide="calendar-range"></i><span>Kelola Tukin</span></button>
               <button class="btn btn-danger btn-sm" id="deleteAbsensiBackendBtn" data-testid="delete-absensi-backend"><i data-lucide="trash-2"></i> Hapus Data Workflow</button>
               <button class="btn btn-ghost btn-sm" id="reconcileBtn" data-testid="reconcile-button" title="Rekonsiliasi"><i data-lucide="clipboard-check"></i><span>Rekonsiliasi</span></button>
               <button class="btn btn-ghost btn-sm" id="auditBtn" data-testid="audit-button" title="Audit Log"><i data-lucide="activity"></i><span>Audit Log</span></button>
               <details class="danger-menu"><summary class="btn btn-ghost btn-sm" title="Tindakan lainnya"><i data-lucide="ellipsis"></i></summary><div class="danger-menu-popover">
-                <button class="btn btn-ghost btn-sm" id="dbResetBtn" data-testid="db-reset-button"><i data-lucide="database"></i> Reset IndexedDB</button>
+                <button class="btn btn-ghost btn-sm" id="dbResetBtn" data-testid="db-reset-button" title="Hanya membersihkan cache lokal; data server tidak berubah"><i data-lucide="database"></i> Bersihkan Cache Browser</button>
                 <button class="btn btn-danger btn-sm" id="backendWorkflowResetBtn" data-testid="backend-workflow-reset-button"><i data-lucide="server-cog"></i> Reset Database Workflow Backend</button>
                 <button class="btn btn-danger btn-sm" id="workflowResultsResetBtn"><i data-lucide="calculator"></i> Hapus Hasil Hitungan Workflow</button>
                 <button class="btn btn-danger btn-sm" id="resetBtn" data-testid="reset-button"><i data-lucide="trash-2"></i> Reset Semua</button>
@@ -83,15 +84,6 @@
         ${sc('Total Record', totalRec, 'database', 'green', false, 'Record')}
         ${sc('Kualitas Data', U.round2(quality) + '%', 'shield-check', quality >= 95 ? 'green' : 'blue', false, quality >= 95 ? 'Sangat baik' : 'Perlu validasi')}
         ${sc('Tukin Dibayar', U.fmtRupiah(totalPay), 'wallet', 'blue', true, 'Total estimasi')}
-        <button class="stat-card blue master-return-kpi" id="masterPengembalianKpi" type="button" data-testid="master-pengembalian-kpi" aria-label="Buka Master Pengembalian">
-          <span class="stat-icon"><i data-lucide="landmark"></i></span>
-          <span class="master-return-copy">
-            <span class="stat-label">Master Pengembalian</span>
-            <strong class="stat-val" id="masterPengembalianValue" aria-live="polite">&mdash;</strong>
-            <span class="stat-meta" id="masterPengembalianMeta">Menghubungkan data arsip&hellip;</span>
-          </span>
-          <span class="master-return-action" aria-hidden="true"><i data-lucide="arrow-up-right"></i></span>
-        </button>
       </div>
 
       <div class="dashboard-lower">
@@ -129,18 +121,11 @@
       catch (error) { EVKIN.toast(error.message, 'error'); }
     };
     el.querySelector('#dbResetBtn').onclick = async () => {
-      if (!confirm('Hapus cache IndexedDB dan reset hasil workflow? Data sumber dan Master SDM backend tetap dipertahankan.')) return;
-      try {
-        if (EVKIN.db && typeof EVKIN.db.resetDatabase === 'function') {
-          await EVKIN.db.resetDatabase();
-        }
-        await EVKIN.resetAll();
-        EVKIN.go('dashboard');
-        EVKIN.toast('Database berhasil direset', 'success');
-      } catch (err) {
-        console.error('Reset database gagal:', err);
-        EVKIN.toast('Database gagal direset: ' + err.message, 'error');
-      }
+      if (!confirm('Bersihkan cache browser di perangkat ini? Data server tidak akan diubah.')) return;
+      const result = await EVKIN.clearBrowserCache();
+      if (result.status === 'SUCCESS') EVKIN.toast('Cache browser berhasil dibersihkan.', 'success');
+      else if (result.status === 'BLOCKED') EVKIN.toast('Cache browser masih digunakan tab EVKIN lain. Tutup tab lain lalu coba lagi.', 'warning');
+      else EVKIN.toast('Cache browser belum berhasil dibersihkan: ' + (result.error || result.status), 'warning');
     };
     el.querySelector('#backendWorkflowResetBtn').onclick = async () => {
       const button = el.querySelector('#backendWorkflowResetBtn');
@@ -158,53 +143,17 @@
         button.disabled = false;
       }
     };
+    const gotoTukin = el.querySelector('#gotoTukinBtn');
+    if (gotoTukin) gotoTukin.onclick = () => { EVKIN.go('tukin-annual'); };
     el.querySelector('#reconcileBtn').onclick = () => { EVKIN.go('reconcile'); };
     el.querySelector('#auditBtn').onclick = () => { EVKIN.go('audit-viewer'); };
     el.querySelector('#nextActionBtn').onclick = () => { EVKIN.go(nextStep.id === 'dashboard' ? 'import' : nextStep.id); };
     el.querySelector('#attentionIncomplete').onclick = () => { EVKIN.go(EVKIN.stepUnlocked('harian') ? 'harian' : 'import'); };
     el.querySelector('#attentionDuplicate').onclick = () => { EVKIN.go(EVKIN.stepUnlocked('harian') ? 'harian' : 'import'); };
-    el.querySelector('#masterPengembalianKpi').onclick = () => { EVKIN.go('master-pengembalian'); };
     el.querySelectorAll('[data-workflow-node]').forEach(node => {
       node.onclick = () => EVKIN.go(node.dataset.workflowNode);
     });
 
-    // Read-only KPI from the same endpoint used by Master Pengembalian.
-    async function loadMasterPengembalianKpi() {
-      const valueEl = el.querySelector('#masterPengembalianValue');
-      const metaEl = el.querySelector('#masterPengembalianMeta');
-      if (!valueEl || !metaEl) return;
-      if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) {
-        valueEl.textContent = '\u2014';
-        metaEl.textContent = 'Backend belum aktif';
-        return;
-      }
-      try {
-        const endpoint = new URL('/pengembalian/monthly/dashboard', EVKIN.exportBackend.apiBase);
-        const response = await fetch(endpoint.toString());
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || 'Gagal memuat KPI pengembalian');
-
-        const totalSdm = Number(payload.total_sdm || 0);
-        const totalFinal = Number(payload.total_final
-          ?? payload.total_pengembalian_tukin_uang_makan
-          ?? payload.total_pengembalian_tukin_final
-          ?? payload.total_potongan_penyesuaian
-          ?? 0);
-        valueEl.textContent = totalSdm.toLocaleString('id-ID');
-        metaEl.textContent = 'SDM · Final ' + U.fmtRupiah(totalFinal);
-        valueEl.closest('.master-return-kpi').title = 'Total pengembalian final: ' + U.fmtRupiah(totalFinal);
-      } catch (err) {
-        valueEl.textContent = '\u2014';
-        metaEl.textContent = 'Data pengembalian belum tersedia';
-        console.warn('Gagal memuat KPI Master Pengembalian:', err);
-      }
-    }
-    loadMasterPengembalianKpi();
-    if (mod.kpiStatusAbort) mod.kpiStatusAbort.abort();
-    mod.kpiStatusAbort = new AbortController();
-    window.addEventListener('evkin:backend-status', () => loadMasterPengembalianKpi(), {
-      signal: mod.kpiStatusAbort.signal
-    });
 
     // Fetch server-side stats/flags if backend analytics available
     (async function () {

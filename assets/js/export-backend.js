@@ -30,6 +30,22 @@
   backend.apiBase = resolveApiBase();
   backend.enabled = false;
   backend.syncQueue = Promise.resolve();
+  backend.runtimeGeneration = null;
+  // Server authority is runtime metadata only. The production default remains
+  // JS_LEGACY until an explicit backend feature-flag activation.
+  const AUTHORITY_STORAGE = 'evkin.absenceAuthority';
+  function storedAuthority() {
+    try {
+      const value = typeof localStorage !== 'undefined' ? localStorage.getItem(AUTHORITY_STORAGE) : '';
+      return ['JS_LEGACY','PYTHON_SHADOW','PYTHON_CANONICAL'].includes(value) ? value : 'JS_LEGACY';
+    } catch (_) { return 'JS_LEGACY'; }
+  }
+  function persistAuthority(value) {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(AUTHORITY_STORAGE, value); }
+    catch (_) { /* Authority metadata is only a fail-safe hint; backend remains authoritative. */ }
+  }
+  backend.calculationAuthority = storedAuthority();
+  backend.mutationBlocked = false;
   const API_KEY_STORAGE = 'evkin.localApiKey';
   const API_KEY_HEADER = 'X-EVKIN-API-Key';
   const nativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
@@ -79,26 +95,180 @@
     } catch (_) { return null; }
   }
 
-  function authenticatedFetch(input, options) {
+  backend.acceptGeneration = function (value) {
+    const generation = Number(value);
+    if (!Number.isSafeInteger(generation) || generation < 0) return false;
+    backend.runtimeGeneration = generation;
+    backend.mutationBlocked = false;
+    return true;
+  };
+
+  function apiErrorInfo(payload, fallback) {
+    const root = payload && typeof payload === 'object' ? payload : {};
+    const detail = root.detail !== undefined ? root.detail :
+      (root.error !== undefined ? root.error : (root.message !== undefined ? root.message : payload));
+    const code = detail && typeof detail === 'object' && !Array.isArray(detail)
+      ? (detail.code || detail.error_code || root.code || root.error_code || '')
+      : (root.code || root.error_code || '');
+    const describe = (value) => {
+      if (value === null || value === undefined || value === '') return '';
+      if (typeof value === 'string') return value;
+      if (Array.isArray(value)) return value.map(describe).filter(Boolean).join('; ');
+      if (typeof value === 'object') {
+        const direct = value.message || value.error_message || value.reason || value.msg;
+        if (direct) {
+          const location = Array.isArray(value.loc) ? value.loc.join('.') : '';
+          return (location ? location + ': ' : '') + describe(direct);
+        }
+        const reasons = value.blocking_reasons || value.errors;
+        if (reasons) return describe(reasons);
+        try { return JSON.stringify(value); } catch (_) { return ''; }
+      }
+      return String(value);
+    };
+    const detailMessage = describe(detail);
+    const prefix = code && !detailMessage.includes(code) ? code + ': ' : '';
+    return { code:String(code || ''), message:prefix + (detailMessage || fallback), detail };
+  }
+
+  backend.apiErrorInfo = apiErrorInfo;
+
+  async function authenticatedFetch(input, options) {
     if (!nativeFetch) return Promise.reject(new Error('Fetch API tidak tersedia.'));
     const target = requestUrl(input);
     const key = backend.getApiKey();
-    if (!target || !key || !authenticatedOrigins.has(target.origin)) return nativeFetch(input, options);
+    const method = String((options && options.method) || (input && input.method) || 'GET').toUpperCase();
+    const mutating = !['GET', 'HEAD', 'OPTIONS'].includes(method);
+    const authenticatedTarget = !!(target && authenticatedOrigins.has(target.origin));
+    if (mutating && authenticatedTarget && backend.mutationBlocked) {
+      return Promise.reject(new Error('Data operasional telah direset dari sesi lain. Muat ulang halaman sebelum melanjutkan.'));
+    }
     const next = { ...(options || {}) };
-    if (typeof Headers !== 'undefined') {
+    if (authenticatedTarget && typeof Headers !== 'undefined') {
       const inherited = input && typeof input === 'object' ? input.headers : undefined;
       const headers = new Headers(next.headers || inherited || {});
-      if (!headers.has(API_KEY_HEADER)) headers.set(API_KEY_HEADER, key);
+      if (key && !headers.has(API_KEY_HEADER)) headers.set(API_KEY_HEADER, key);
+      if (mutating && Number.isSafeInteger(backend.runtimeGeneration) && !headers.has('X-EVKIN-Generation')) {
+        headers.set('X-EVKIN-Generation', String(backend.runtimeGeneration));
+      }
       next.headers = headers;
-    } else {
+    } else if (authenticatedTarget) {
       next.headers = { ...((input && input.headers) || {}), ...(next.headers || {}) };
-      if (!next.headers[API_KEY_HEADER]) next.headers[API_KEY_HEADER] = key;
+      if (key && !next.headers[API_KEY_HEADER]) next.headers[API_KEY_HEADER] = key;
+      if (mutating && Number.isSafeInteger(backend.runtimeGeneration) && !next.headers['X-EVKIN-Generation']) {
+        next.headers['X-EVKIN-Generation'] = String(backend.runtimeGeneration);
+      }
     }
-    return nativeFetch(input, next);
+    const response = await nativeFetch(input, authenticatedTarget ? next : options);
+    const responseGeneration = Number(response.headers && response.headers.get('X-EVKIN-Generation'));
+    if (response.ok && Number.isSafeInteger(responseGeneration)) {
+      backend.runtimeGeneration = responseGeneration;
+    }
+    if (mutating && authenticatedTarget && (response.status === 409 || response.status === 423)) {
+      const body = await response.clone().json().catch(() => ({}));
+      const detail = body && body.detail;
+      const code = detail && typeof detail === 'object' ? detail.code : '';
+      if (code === 'STALE_CLIENT_AFTER_RESET' || code === 'RESET_IN_PROGRESS' || code === 'GENERATION_REQUIRED') {
+        backend.mutationBlocked = true;
+        const message = code === 'RESET_IN_PROGRESS'
+          ? 'Reset data sedang berlangsung. Tunggu dan muat ulang halaman.'
+          : 'Data operasional telah direset dari sesi lain. Halaman harus dimuat ulang sebelum melanjutkan.';
+        if (EVKIN.toast && !backend.staleNoticeShown) EVKIN.toast(message, 'error');
+        backend.staleNoticeShown = true;
+      }
+    }
+    return response;
   }
 
   backend.apiFetch = authenticatedFetch;
   if (nativeFetch) globalThis.fetch = authenticatedFetch;
+
+  backend.getAbsenceAuthority = async function (apiBase = backend.apiBase) {
+    const response = await fetch(new URL('/api/absence/authority', normalizeApiBase(apiBase)).toString(), {
+      method:'GET', cache:'no-store'
+    });
+    if (!response.ok) throw new Error('Status authority kalkulasi tidak tersedia: HTTP ' + response.status);
+    const result = await response.json();
+    backend.calculationAuthority = result.authority || 'JS_LEGACY';
+    persistAuthority(backend.calculationAuthority);
+    return result;
+  };
+
+  backend.startAbsenceCalculation = async function (period, actor, reason, apiBase = backend.apiBase) {
+    const response = await fetch(new URL('/api/absence/calculate', normalizeApiBase(apiBase)).toString(), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({period, actor, reason})
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const detail = result && result.detail;
+      const message = detail && typeof detail === 'object' ? detail.message : detail;
+      throw new Error(message || 'Calculation backend gagal dimulai: HTTP ' + response.status);
+    }
+    return result;
+  };
+
+  backend.getAbsenceCalculation = async function (calculationId, apiBase = backend.apiBase) {
+    const url = new URL('/api/absence/calculation/' + encodeURIComponent(calculationId), normalizeApiBase(apiBase));
+    const response = await fetch(url.toString(), {method:'GET', cache:'no-store'});
+    if (!response.ok) throw new Error('Status calculation tidak tersedia: HTTP ' + response.status);
+    return response.json();
+  };
+
+  backend.getLatestAbsenceCalculation = async function (period, apiBase = backend.apiBase) {
+    const url = new URL('/api/absence/calculation/latest', normalizeApiBase(apiBase));
+    url.searchParams.set('period', period);
+    const response = await fetch(url.toString(), {method:'GET', cache:'no-store'});
+    if (!response.ok) throw new Error('Calculation terbaru tidak tersedia: HTTP ' + response.status);
+    return response.json();
+  };
+
+  backend.waitAbsenceCalculation = async function (calculationId, options = {}) {
+    const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 300000);
+    const intervalMs = Math.max(50, Number(options.intervalMs) || 500);
+    const deadline = Date.now() + timeoutMs;
+    const terminal = new Set(['COMPLETED','SHADOW_ONLY','FAILED','STALE_SOURCE','STALE_GENERATION']);
+    while (Date.now() <= deadline) {
+      const batch = await backend.getAbsenceCalculation(calculationId, options.apiBase || backend.apiBase);
+      if (terminal.has(batch.status)) {
+        if (batch.status === 'COMPLETED' || batch.status === 'SHADOW_ONLY') return batch;
+        const error = new Error(batch.error_message || `Calculation berhenti dengan status ${batch.status}.`);
+        error.code = batch.error_code || batch.status;
+        error.batch = batch;
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    const error = new Error('Calculation backend melewati batas waktu tunggu.');
+    error.code = 'CALCULATION_POLL_TIMEOUT';
+    throw error;
+  };
+
+  backend.hydrateCanonicalAbsence = async function (period, calculationId) {
+    if (!EVKIN.loadWorkflowSource) throw new Error('Hydrator workflow backend tidak tersedia.');
+    const daily = await EVKIN.loadWorkflowSource('daily_data', {all:true, force:true, periode:period});
+    const rekap = await EVKIN.loadWorkflowSource('rekap_sdm', {all:true, force:true, periode:period});
+    const finalRows = await EVKIN.loadWorkflowSource('final_absensi', {all:true, force:true, periode:period});
+    const sets = [daily, rekap, finalRows];
+    if (calculationId && sets.some(rows => rows.some(row => row.calculation_id !== calculationId))) {
+      throw new Error('Hydration canonical memuat calculation_id yang tidak konsisten.');
+    }
+    return {daily, rekap, final_absensi:finalRows, calculation_id:calculationId || null};
+  };
+
+  backend.runCanonicalAbsenceCalculation = async function (period, actor, reason, options = {}) {
+    const authority = await backend.getAbsenceAuthority(options.apiBase || backend.apiBase);
+    if (authority.authority !== 'PYTHON_CANONICAL') {
+      throw new Error('Authority aktif bukan PYTHON_CANONICAL.');
+    }
+    const pending = await backend.startAbsenceCalculation(period, actor, reason, options.apiBase || backend.apiBase);
+    const completed = await backend.waitAbsenceCalculation(pending.calculation_id, options);
+    if (completed.status !== 'COMPLETED' || !completed.canonical) {
+      throw new Error('Calculation selesai tanpa hasil canonical.');
+    }
+    const hydrated = await backend.hydrateCanonicalAbsence(period, completed.calculation_id);
+    return {batch:completed, hydrated};
+  };
 
   backend.downloadAuthenticated = async function (value) {
     const response = await authenticatedFetch(value, { method: 'GET', cache: 'no-store' });
@@ -210,11 +380,50 @@
     return backend.apiBase;
   };
 
+  function workflowJsonBody(workflow) {
+    // A workflow can exceed the engine's maximum string length. Snapshot rows
+    // separately into bounded Blob parts; never join the entire JSON document.
+    // Keep one request so the backend still commits every table atomically.
+    const parts = [];
+    let pending = [], chars = 0;
+    const flush = () => {
+      if (!pending.length) return;
+      parts.push(new Blob(pending));
+      pending = [];
+      chars = 0;
+    };
+    const append = text => {
+      if (chars + text.length > 1024 * 1024 || pending.length >= 500) flush();
+      pending.push(text);
+      chars += text.length;
+    };
+    append('{');
+    let first = true;
+    for (const [source, value] of Object.entries(workflow || {})) {
+      const isTable = Array.isArray(value);
+      const json = isTable ? null : JSON.stringify(value);
+      if (!isTable && json === undefined) continue;
+      append((first ? '' : ',') + JSON.stringify(source) + ':');
+      first = false;
+      if (isTable) {
+        append('[');
+        for (let index = 0; index < value.length; index++) {
+          if (index) append(',');
+          append(JSON.stringify(value[index]) ?? 'null');
+        }
+        append(']');
+      } else append(json);
+    }
+    append('}');
+    flush();
+    return new Blob(parts, {type: 'application/json'});
+  }
+
   backend.syncWorkflow = async function (workflow, apiBase = backend.apiBase) {
     if (EVKIN.deletingAbsensi) throw new Error('Reset sedang berlangsung; sinkronisasi ditunda.');
     const onProgress = arguments.length > 2 && typeof arguments[2] === 'function' ? arguments[2] : null;
     // Capture one immutable snapshot and commit all tables in a single transaction.
-    const body = JSON.stringify(workflow || {});
+    const body = workflowJsonBody(workflow);
     const write = async () => {
       if (onProgress) onProgress('Workflow', 0, 1);
       const response = await fetch(new URL('/api/workflow/sync', apiBase), {
@@ -231,22 +440,68 @@
     return result;
   };
 
-  async function syncTable(source, rows, replace, apiBase) {
+  async function writeTable(source, rows, replace, apiBase, scope) {
     const response = await fetch(new URL('/api/workflow/sync-table', normalizeApiBase(apiBase)).toString(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, rows, replace }),
-      signal: AbortSignal.timeout(60000)
+      body: JSON.stringify({ source, rows, replace,
+        workflow_id:(scope && scope.workflow_id) || 'default',
+        periode:(scope && scope.periode) || null }),
+      signal: AbortSignal.timeout(300000)
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || 'Sinkronisasi tabel ke backend gagal: ' + source);
+      let payload = text;
+      try {
+        payload = JSON.parse(text);
+      } catch (_) { /* Keep the plain response body. */ }
+      const info = apiErrorInfo(payload, `Sinkronisasi tabel ke backend gagal: ${source} (HTTP ${response.status})`);
+      const error = new Error(info.message);
+      error.code = info.code || `HTTP_${response.status}`;
+      error.detail = info.detail;
+      error.status = response.status;
+      error.source = source;
+      throw error;
     }
     return response.json();
   }
 
-  // Expose syncTable for direct use by import flow
-  backend.syncTable = syncTable;
+  // Serialize table writes with all other workflow writes. Import chunks must
+  // arrive in order: first chunk initializes, following chunks append.
+  backend.syncTable = function (source, rows, replace, apiBase = backend.apiBase, scope = {}) {
+    const snapshot = JSON.parse(JSON.stringify(Array.isArray(rows) ? rows : []));
+    const write = () => writeTable(source, snapshot, replace, apiBase, scope);
+    const result = backend.syncQueue.then(write, write);
+    backend.syncQueue = result.catch(() => undefined);
+    return result;
+  };
+
+  backend.syncTableChunks = async function (source, rows, options = {}) {
+    let sourceRows = Array.isArray(rows) ? rows : [];
+    // JSON.stringify omits undefined object properties.  Without a stable
+    // projection, an otherwise valid raw-import column can disappear from one
+    // chunk and make the following append fail schema validation.
+    if (source === 'raw_import' && sourceRows.length) {
+      const columns = [...new Set(sourceRows.flatMap(row => Object.keys(row || {})))];
+      sourceRows = sourceRows.map(row => Object.fromEntries(
+        columns.map(column => [column, row && row[column] !== undefined ? row[column] : null])
+      ));
+    }
+    const chunkSize = Math.max(5000, Math.min(10000, Number(options.chunkSize) || 7500));
+    const totalChunks = Math.max(1, Math.ceil(sourceRows.length / chunkSize));
+    let result = null;
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+      const start = chunkIndex * chunkSize;
+      const chunk = sourceRows.slice(start, start + chunkSize);
+      result = await backend.syncTable(source, chunk, chunkIndex === 0, options.apiBase || backend.apiBase, {
+        workflow_id:options.workflow_id || 'default', periode:options.periode || null
+      });
+      if (typeof options.onProgress === 'function') {
+        options.onProgress(source, chunkIndex + 1, totalChunks, Math.min(start + chunk.length, sourceRows.length));
+      }
+    }
+    return result;
+  };
 
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
@@ -416,7 +671,7 @@
   // Lightweight mark: avoid resending the full workflow payload when only the semifinal verified flag changes.
   EVKIN.exportBackend.markSemifinalVerified = async function (opts = {}) {
     if (typeof opts === 'string') opts = { bulan: opts };
-    const { bulan = '2026-08', verified = true, apiBase = backend.apiBase, timeoutMs = 8000 } = opts;
+    const { bulan = '2026-08', verified = true, apiBase = backend.apiBase, timeoutMs = 60000 } = opts;
     const url = new URL('/api/workflow/mark-semifinal', apiBase);
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), timeoutMs);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import io
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -12,27 +13,42 @@ import shutil
 from pathlib import Path
 from typing import Any, Optional, List
 
-import pandas as pd
+from backend.lazy_imports import lazy_module
+
+pd = lazy_module("pandas")
 import duckdb
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uuid
 import json
 from datetime import datetime
 import concurrent.futures
-from backend.runtime_guard import claim_database, database_job, serialize_database_requests
+import threading
+from backend.runtime_guard import (
+    StaleGenerationError,
+    assert_current_generation,
+    claim_database,
+    current_reset_generation,
+    database_job,
+    initialize_runtime_state,
+    serialize_database_requests,
+)
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
 from backend.workflow_readiness import record_verification
 from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
-from backend.schema_sync import create_table_from_relation, insert_relation_by_name
+from backend.schema_sync import SchemaMismatchError, create_table_from_relation, insert_relation_by_name
 from backend.reset_service import RESET_PROFILES, ResetService
 
 # Executor for background compute jobs
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='evkin-jobs')
 # Keep futures to allow cancellation from the main process
 _job_futures: dict = {}
+_workflow_read_base = None
+_workflow_read_path = None
+_workflow_read_lock = threading.RLock()
+logger = logging.getLogger(__name__)
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = APP_ROOT / "assets"
@@ -145,11 +161,6 @@ DUCKDB_PATH = os.environ.get('EVKIN_DUCKDB_PATH') or str(Path(__file__).resolve(
 
 # Mount after DUCKDB_PATH is initialized because the legacy pengembalian
 # module imports that setting while defining its compatibility helpers.
-try:
-    pengembalian_api = importlib.import_module("backend.pengembalian_api")
-    app.include_router(pengembalian_api.router, prefix="/pengembalian")
-except Exception as exc:
-    print("Master Pengembalian API tidak terpasang:", exc)
 
 # Modul pengelolaan Tukin tahunan memakai DuckDB yang sama dengan workflow
 # absensi agar hasil final aktif dapat ditangkap tanpa ekspor/impor ulang.
@@ -180,10 +191,25 @@ from backend.tukin_combined import create_router as create_combined_router
 app.include_router(create_combined_router(lambda: DUCKDB_PATH))
 from backend.final_tukin import create_router as create_final_tukin_router
 app.include_router(create_final_tukin_router(lambda: DUCKDB_PATH))
+from backend.tukin_reconciliation import create_router as create_tukin_reconciliation_router
+app.include_router(create_tukin_reconciliation_router(lambda: DUCKDB_PATH))
 from backend.application_reset import create_router as create_reset_router
 app.include_router(create_reset_router(lambda: DUCKDB_PATH, lambda: DB_PATH))
 from backend.module_reset import create_router as create_module_reset_router
 app.include_router(create_module_reset_router(lambda: DUCKDB_PATH))
+from backend.absence_cutover import (
+    create_router as create_absence_calculation_router,
+    current_authority_config,
+    recover_interrupted_batches,
+    shutdown_calculation_executor,
+)
+app.include_router(create_absence_calculation_router(lambda: DUCKDB_PATH))
+from backend.absence_import import (
+    create_router as create_absence_import_router,
+    recover_interrupted_imports,
+    shutdown_import_executor,
+)
+app.include_router(create_absence_import_router(lambda: DUCKDB_PATH))
 EXCEL_INVALID_XML_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
 EXPORT_PERIOD_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -252,7 +278,223 @@ def prepare_workflow_frame(source: str, rows: list[dict[str, Any]]) -> pd.DataFr
     for column, default in WORKFLOW_OPTIONAL_COLUMNS.get(source, {}).items():
         if column not in frame.columns:
             frame[column] = default
-    return prepare_database_frame(frame)
+    frame = prepare_database_frame(frame)
+    if source == 'raw_import':
+        # Raw spreadsheet/CSV columns are intentionally schema-less.  Inferring
+        # their DuckDB types per HTTP chunk is unsafe: an early batch containing
+        # only numbers creates an INTEGER column, while a later blank/text value
+        # then fails to append and leaves a partial canonical import.  Persist
+        # every raw cell as text so every batch has one stable representation;
+        # the browser importer performs the actual date/time/number parsing.
+        for column in frame.columns:
+            frame[column] = frame[column].map(
+                lambda value: None if value is None or (
+                    isinstance(value, float) and pd.isna(value)
+                ) else str(value)
+            ).astype('string')
+    return frame
+
+
+WORKFLOW_STRUCTURED_FIELDS = {
+    'flags', 'issues', 'tanggal', 'tanggalMasukObj', 'tanggalPulangObj'
+}
+WORKFLOW_CONFIG_STRUCTURED_FIELDS = {
+    'jamDasar', 'flexi', 'holidays', 'jabatanMaster', 'keterlambatanTiers',
+    'pulangCepatTiers', 'jenisNoPotongan', 'leavePeriods', '_workflow'
+}
+WORKFLOW_PERIOD_COLUMNS = (
+    'bulan', 'monthkey', 'periode', 'periode_id', 'assessment_period',
+    'tanggalkey', 'tanggal'
+)
+
+
+@app.exception_handler(SchemaMismatchError)
+async def workflow_schema_mismatch_handler(_request, exc: SchemaMismatchError):
+    logger.error('Workflow persistence schema mismatch',
+                 exc_info=(type(exc), exc, exc.__traceback__))
+    return JSONResponse(status_code=409, content={'detail': {
+        'code': 'WORKFLOW_PERSISTENCE_SCHEMA_MISMATCH',
+        'message': 'Penyimpanan impor gagal karena struktur antar-batch tidak konsisten.',
+        'stage': 'IMPORT_PERSISTENCE',
+    }})
+WORKFLOW_ID_COLUMNS = ('workflow_id', 'batch_id', 'import_batch_id', 'calculation_batch_id')
+
+
+def decode_workflow_rows(source: str, frame: pd.DataFrame) -> list[dict[str, Any]]:
+    if frame.empty or set(frame.columns) == {'_empty'}:
+        return []
+    rows = frame.to_dict(orient='records')
+    structured_fields = WORKFLOW_CONFIG_STRUCTURED_FIELDS if source == 'config' else WORKFLOW_STRUCTURED_FIELDS
+    for row in rows:
+        for field in structured_fields:
+            value = row.get(field)
+            if isinstance(value, str) and value[:1] in ('[', '{'):
+                try:
+                    row[field] = json.loads(value)
+                except ValueError:
+                    pass
+    return rows
+
+
+def workflow_config_metadata(config: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep startup configuration small without changing the stored legacy shape."""
+    if not config:
+        return None
+    result = json.loads(json.dumps(config, ensure_ascii=False, default=str))
+    result.pop('masterPegawai', None)
+    workflow = result.get('_workflow')
+    if isinstance(workflow, dict):
+        for key, row_keys in {
+            'finalSKP': ('rows',),
+            'finalKombinasi': ('rows',),
+            'finalCombinedSKP': ('rows', 'skpRows', 'eabsensiRows', 'esdmRows', 'combinedRows'),
+        }.items():
+            value = workflow.get(key)
+            if isinstance(value, dict):
+                workflow[key] = {name: item for name, item in value.items() if name not in row_keys}
+    return result
+
+
+def workflow_table_columns(connection, table: str) -> list[str]:
+    try:
+        return [str(row[1]) for row in connection.execute(f"PRAGMA table_info('{table}')").fetchall()]
+    except Exception:
+        return []
+
+
+def read_workflow_config(connection) -> dict[str, Any] | None:
+    """Read the one active workflow manifest, including legacy JSON-only rows."""
+    try:
+        cursor = connection.execute('SELECT * FROM "workflow_config" LIMIT 1')
+        values = cursor.fetchone()
+        if values is None:
+            return None
+        config = dict(zip((column[0] for column in cursor.description), values))
+        if len(config) == 1:
+            only_value = next(iter(config.values()))
+            if isinstance(only_value, str) and only_value[:1] == '{':
+                parsed = json.loads(only_value)
+                if isinstance(parsed, dict):
+                    config = parsed
+        for field in WORKFLOW_CONFIG_STRUCTURED_FIELDS:
+            value = config.get(field)
+            if isinstance(value, str) and value[:1] in ('[', '{'):
+                try:
+                    config[field] = json.loads(value)
+                except ValueError:
+                    pass
+        return config
+    except (duckdb.Error, ValueError, TypeError):
+        return None
+
+
+def workflow_scope_sql(
+    source: str,
+    columns: list[str],
+    periode: str | None,
+    workflow_id: str | None,
+) -> tuple[str, list[str]]:
+    lower_columns = {column.lower(): column for column in columns}
+    clauses: list[str] = []
+    params: list[str] = []
+    requested_workflow = str(workflow_id or '').strip()
+    workflow_column = next((lower_columns[name] for name in WORKFLOW_ID_COLUMNS if name in lower_columns), None)
+    if requested_workflow and workflow_column:
+        clauses.append(f'CAST("{workflow_column}" AS VARCHAR) = ?')
+        params.append(requested_workflow)
+    # Legacy workflow tables contain one replace-only active dataset and do not
+    # have a workflow column. Their scope is the active workflow_config manifest;
+    # the dedicated calculation endpoint validates that manifest explicitly.
+
+    requested_period = str(periode or '').strip()
+    if requested_period:
+        period_column = next((lower_columns[name] for name in WORKFLOW_PERIOD_COLUMNS if name in lower_columns), None)
+        if period_column:
+            if period_column.lower() in {'tanggal', 'tanggalkey'}:
+                clauses.append(
+                    f'(substr(CAST("{period_column}" AS VARCHAR), 1, 7) = ? OR '
+                    f"strftime(try_strptime(CAST(\"{period_column}\" AS VARCHAR), '%d/%m/%Y'), '%Y-%m') = ?)"
+                )
+                params.append(requested_period)
+            else:
+                clauses.append(f'CAST("{period_column}" AS VARCHAR) = ?')
+            params.append(requested_period)
+        elif source == 'processed_data' and 'record' in lower_columns:
+            record_column = lower_columns['record']
+            clauses.append(
+                f"coalesce(try(json_extract_string(\"{record_column}\", '$.tanggal.monthKey')), "
+                f"try(json_extract_string(\"{record_column}\", '$.monthKey')), "
+                f"substr(try(json_extract_string(\"{record_column}\", '$.tanggalKey')), 1, 7)) = ?"
+            )
+            params.append(requested_period)
+    return (' WHERE ' + ' AND '.join(clauses)) if clauses else '', params
+
+
+WORKFLOW_LIST_COLUMNS = {
+    'raw_import': ('nip', 'nama', 'jabatan', 'tanggal', 'bulan', 'unit', 'jenis',
+                   'batch_id', 'source_file', 'source_row', 'imported_at'),
+    'daily_data': ('nip', 'nama', 'jabatan', 'bulan', 'tanggal', 'jamMasuk',
+                   'jamPulang', 'durasi', 'metode', 'jenis', 'statusLengkap',
+                   'totalHarian', 'flags'),
+    'rekap_sdm': ('nip', 'nama', 'jabatan', 'bulan', 'jumlahRecord',
+                  'hariEfektif', 'hariAdaAbsensi', 'hariKurang', 'jumlahHariAbsen',
+                  'total', 'status'),
+    'final_absensi': ('nip', 'nama', 'jabatan', 'bulan', 'status', 'tukin',
+                      'tukinbruto', 'tukin_gross', 'potPct', 'nominal',
+                      'finalDibayar', 'final_tukin_dibayar'),
+}
+
+
+def _workflow_filtered_sql(source: str, columns: list[str], periode: str | None,
+                           workflow_id: str | None, search: str | None,
+                           filter_value: str | None) -> tuple[str, list[Any]]:
+    where_sql, params = workflow_scope_sql(source, columns, periode, workflow_id)
+    clauses = [where_sql[7:]] if where_sql else []
+    lower = {column.lower(): column for column in columns}
+    needle = str(search or '').strip()
+    if needle:
+        candidates = [lower[name] for name in
+                      ('nip', 'nama', 'jabatan', 'status', 'bulan', 'periode', 'unit')
+                      if name in lower]
+        if source == 'processed_data' and 'record' in lower:
+            record = lower['record']
+            candidates.extend([
+                f"try(json_extract_string(\"{record}\", '$.nip'))",
+                f"try(json_extract_string(\"{record}\", '$.nama'))",
+                f"try(json_extract_string(\"{record}\", '$.jabatan'))",
+            ])
+            clauses.append('(' + ' OR '.join(f'lower(coalesce(CAST({item} AS VARCHAR), \'\')) LIKE ?'
+                                               for item in candidates) + ')')
+        elif candidates:
+            clauses.append('(' + ' OR '.join(f'lower(coalesce(CAST("{item}" AS VARCHAR), \'\')) LIKE ?'
+                                               for item in candidates) + ')')
+        params.extend([f'%{needle.lower()}%'] * len(candidates))
+    raw_filter = str(filter_value or '').strip()
+    if raw_filter:
+        try:
+            parsed = json.loads(raw_filter) if raw_filter.startswith('{') else {
+                raw_filter.split(':', 1)[0]: raw_filter.split(':', 1)[1]
+            }
+        except (ValueError, IndexError, json.JSONDecodeError) as exc:
+            raise HTTPException(400, 'Filter harus JSON object atau column:value') from exc
+        if not isinstance(parsed, dict):
+            raise HTTPException(400, 'Filter harus berupa object')
+        for requested, value in parsed.items():
+            column = lower.get(str(requested).lower())
+            if not column:
+                raise HTTPException(400, f'Kolom filter tidak dikenal: {requested}')
+            clauses.append(f'CAST("{column}" AS VARCHAR) = ?')
+            params.append(str(value))
+    return (' WHERE ' + ' AND '.join(clauses)) if clauses else '', params
+
+
+def _workflow_list_projection(source: str, columns: list[str]) -> str:
+    wanted = WORKFLOW_LIST_COLUMNS.get(source)
+    if not wanted:
+        return '*'
+    lower = {column.lower(): column for column in columns}
+    selected = [f'"{lower[name.lower()]}"' for name in wanted if name.lower() in lower]
+    return ','.join(selected) if selected else '*'
 
 
 def get_connection() -> sqlite3.Connection:
@@ -308,19 +550,84 @@ def ensure_duckdb_master_schema() -> dict:
     return {"status": "ok", "duckdb": DUCKDB_PATH, "tables": list(WORKFLOW_TABLES.values())}
 
 
+STARTUP_SCHEMA_TABLES = frozenset(WORKFLOW_TABLES.values()) | {
+    'workflow_flags', 'workflow_meta', 'final_tukin_schema', 'master_skp_rules',
+    'skp_import_batches', 'skp_results', 'final_tukin_batches',
+    'final_tukin_results', 'tukin_calculation_batch',
+    'tukin_calculation_result', 'tukin_final_decision',
+}
+STARTUP_SCHEMA_INDEXES = {
+    'idx_tukin_calc_period', 'idx_tukin_calc_result_key', 'idx_tukin_final_period',
+}
+
+
+def startup_schema_is_current(db_path: str | None = None) -> bool:
+    """Read-only fast path for the exact schema guaranteed by startup migrations."""
+    path = str(db_path or DUCKDB_PATH)
+    if not Path(path).is_file():
+        return False
+    try:
+        with duckdb.connect(path, read_only=True) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
+            ).fetchall()}
+            if not STARTUP_SCHEMA_TABLES.issubset(tables):
+                return False
+            batch_columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info('skp_import_batches')"
+            ).fetchall()}
+            if not {'excluded_count', 'validation_report'}.issubset(batch_columns):
+                return False
+            versions = {int(row[0]) for row in conn.execute(
+                'SELECT version FROM final_tukin_schema WHERE version IN (1, 2)'
+            ).fetchall()}
+            if versions != {1, 2}:
+                return False
+            indexes = {row[0] for row in conn.execute(
+                "SELECT index_name FROM duckdb_indexes() WHERE schema_name='main'"
+            ).fetchall()}
+            return STARTUP_SCHEMA_INDEXES.issubset(indexes)
+    except (duckdb.Error, OSError, ValueError):
+        return False
+
+
+def workflow_read_cursor():
+    """Reuse DuckDB catalog state while giving each request an isolated cursor."""
+    global _workflow_read_base, _workflow_read_path
+    path = str(Path(DUCKDB_PATH).resolve())
+    with _workflow_read_lock:
+        if _workflow_read_base is None or _workflow_read_path != path:
+            if _workflow_read_base is not None:
+                _workflow_read_base.close()
+            _workflow_read_base = duckdb.connect(path)
+            _workflow_read_path = path
+        return _workflow_read_base.cursor()
+
+
 @app.on_event("startup")
 def startup_bootstrap() -> None:
     claim_database(DUCKDB_PATH)
-    ensure_duckdb_master_schema()
-    from backend.final_tukin import migrate as migrate_final_tukin
-    migrate_final_tukin(DUCKDB_PATH)
+    if not startup_schema_is_current():
+        ensure_duckdb_master_schema()
+        from backend.final_tukin import migrate as migrate_final_tukin
+        migrate_final_tukin(DUCKDB_PATH)
+    initialize_runtime_state(DUCKDB_PATH)
+    recover_interrupted_batches(DUCKDB_PATH)
+    recover_interrupted_imports(DUCKDB_PATH)
     with get_connection() as conn:
         conn.execute("UPDATE jobs SET status='failed', message='Backend dimulai ulang. Jalankan kembali proses ini.' WHERE status IN ('queued','running')")
 
 
 @app.on_event('shutdown')
 def shutdown_jobs():
+    global _workflow_read_base
     _executor.shutdown(wait=True, cancel_futures=True)
+    shutdown_calculation_executor()
+    shutdown_import_executor()
+    with _workflow_read_lock:
+        if _workflow_read_base is not None:
+            _workflow_read_base.close()
+            _workflow_read_base = None
 
 
 def create_workflow_indexes(conn: sqlite3.Connection, table: str) -> None:
@@ -648,11 +955,6 @@ def sync_workflow(payload: dict[str, Any]) -> dict:
         dconn.execute('BEGIN TRANSACTION')
         for source, table in table_map.items():
             rows = prepared[source]
-            # drop existing
-            try:
-                dconn.execute(f'DROP TABLE IF EXISTS "{table}"')
-            except Exception:
-                pass
             if rows:
                 frame = prepare_workflow_frame(source, rows)
                 # register and create/replace
@@ -663,8 +965,7 @@ def sync_workflow(payload: dict[str, Any]) -> dict:
                 except Exception:
                     pass
             else:
-                # create empty placeholder
-                dconn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" (_empty TEXT)')
+                dconn.execute(f'CREATE OR REPLACE TABLE "{table}" (_empty TEXT)')
             counts[source] = len(rows)
         dconn.commit()
     except Exception:
@@ -688,45 +989,296 @@ def sync_workflow(payload: dict[str, Any]) -> dict:
 
 
 @app.get("/api/workflow/state")
-def get_workflow_state() -> dict:
-    """Return the current workflow state from DuckDB so the browser can hydrate from the master database."""
-    ensure_duckdb_master_schema()
+def get_workflow_state(
+    periode: Optional[str] = Query(None),
+    workflow_id: Optional[str] = Query(None),
+) -> dict:
+    """Return startup metadata only; large workflow rows are loaded lazily."""
     import duckdb as _duckdb
-    dconn = _duckdb.connect(DUCKDB_PATH)
-    payload: dict[str, Any] = {}
+    dconn = workflow_read_cursor()
+    config: dict[str, Any] | None = None
+    row_counts: dict[str, int] = {}
+    total_row_counts: dict[str, int] = {}
     try:
+        config = read_workflow_config(dconn)
+        workflow = config.get('_workflow', {}) if isinstance(config, dict) else {}
+        periode = periode if isinstance(periode, str) else None
+        workflow_id = workflow_id if isinstance(workflow_id, str) else None
+        active_period = str(periode or workflow.get('month') or '').strip() or None
+        active_workflow_id = str(
+            workflow_id or workflow.get('workflow_id') or workflow.get('workflowId') or 'default'
+        ).strip() or 'default'
         for source, table in WORKFLOW_TABLES.items():
-            if source == 'master_data':
+            if source in {'master_data', 'config'}:
                 continue
             try:
-                df = dconn.execute(f'SELECT * FROM "{table}"').fetchdf()
+                columns = workflow_table_columns(dconn, table)
+                if not columns or columns == ['_empty']:
+                    total_row_counts[source] = 0
+                    row_counts[source] = 0
+                    continue
+                total_row_counts[source] = int(
+                    dconn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                )
+                where_sql, params = workflow_scope_sql(
+                    source, columns, active_period, active_workflow_id
+                )
+                row_counts[source] = int(
+                    dconn.execute(f'SELECT COUNT(*) FROM "{table}"{where_sql}', params).fetchone()[0]
+                )
+            except HTTPException:
+                raise
             except Exception:
-                df = pd.DataFrame()
-            if df.empty or set(df.columns) == {'_empty'}:
-                rows = []
-            else:
-                rows = df.to_dict(orient='records')
-                structured_fields = ({'jamDasar', 'flexi', 'holidays', 'jabatanMaster', 'keterlambatanTiers',
-                                      'pulangCepatTiers', 'jenisNoPotongan', 'leavePeriods', '_workflow'}
-                                     if source == 'config' else {'flags', 'issues', 'tanggal', 'tanggalMasukObj', 'tanggalPulangObj'})
-                for row in rows:
-                    for field in structured_fields:
-                        value = row.get(field)
-                        if isinstance(value, str) and value[:1] in ('[', '{'):
-                            try:
-                                row[field] = json.loads(value)
-                            except ValueError:
-                                pass
-            if source == 'config':
-                if not rows:
-                    payload[source] = None
-                else:
-                    payload[source] = {key: value for key, value in rows[0].items() if key != 'masterPegawai'}
-            else:
-                payload[source] = rows
+                total_row_counts[source] = 0
+                row_counts[source] = 0
     finally:
         dconn.close()
-    return {"status": "ok", "data": payload}
+    metadata_config = workflow_config_metadata(config)
+    return {
+        "status": "ok",
+        "reset_generation": current_reset_generation(),
+        "calculation_authority": current_authority_config().authority.value,
+        "data": {"config": metadata_config},
+        "meta": {
+            "workflow_id": active_workflow_id,
+            "periode": active_period,
+            "status": "ACTIVE" if any(total_row_counts.values()) else "EMPTY",
+            "row_counts": row_counts,
+            "total_row_counts": total_row_counts,
+            "default_page_size": 100,
+        },
+    }
+
+
+@app.get("/api/workflow/data/{source}")
+def get_workflow_data(
+    source: str,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(100, ge=1, le=1000),
+    periode: Optional[str] = Query(None),
+    workflow_id: Optional[str] = Query('default'),
+    page_size: Optional[int] = Query(None, ge=1, le=500),
+    search: Optional[str] = Query(None, max_length=200),
+    filter_value: Optional[str] = Query(None, alias='filter', max_length=1000),
+    sort: Optional[str] = Query(None, max_length=100),
+    sort_dir: str = Query('asc', pattern='^(?i)(asc|desc)$'),
+    include_detail: bool = Query(False),
+) -> dict:
+    """Read a lightweight workflow page; search/filter/sort run in DuckDB."""
+    page_size = page_size if isinstance(page_size, int) else None
+    search = search if isinstance(search, str) else None
+    filter_value = filter_value if isinstance(filter_value, str) else None
+    sort = sort if isinstance(sort, str) else None
+    sort_dir = sort_dir if isinstance(sort_dir, str) and sort_dir.lower() in {'asc', 'desc'} else 'asc'
+    include_detail = include_detail if isinstance(include_detail, bool) else False
+    table = WORKFLOW_WRITABLE.get(source)
+    if not table:
+        raise HTTPException(404, f"Sumber workflow tidak ditemukan: {source}")
+    import duckdb as _duckdb
+    dconn = workflow_read_cursor()
+    try:
+        columns = workflow_table_columns(dconn, table)
+        if not columns or columns == ['_empty']:
+            effective_size = page_size or min(per_page, 500)
+            return {
+                "status": "ok", "source": source, "rows": [], "total": 0,
+                "page": page, "page_size": effective_size, "per_page": effective_size,
+                "total_pages": 0,
+                "workflow_id": workflow_id or 'default', "periode": periode,
+            }
+        effective_size = page_size or min(per_page, 500)
+        where_sql, params = _workflow_filtered_sql(
+            source, columns, periode, workflow_id, search, filter_value
+        )
+        total = int(dconn.execute(f'SELECT COUNT(*) FROM "{table}"{where_sql}', params).fetchone()[0])
+        lower = {column.lower(): column for column in columns}
+        requested_sort = str(sort or '').strip().lower()
+        sort_column = lower.get(requested_sort)
+        if requested_sort and not sort_column:
+            raise HTTPException(400, f'Kolom sort tidak dikenal: {sort}')
+        order_sql = f'"{sort_column}" {sort_dir.upper()}, rowid' if sort_column else 'rowid'
+        projection = '*' if include_detail else _workflow_list_projection(source, columns)
+        offset = (page - 1) * effective_size
+        frame = dconn.execute(
+            f'SELECT rowid AS _row_id,{projection} FROM "{table}"{where_sql} '
+            f'ORDER BY {order_sql} LIMIT ? OFFSET ?',
+            list(params) + [effective_size, offset],
+        ).fetchdf()
+        rows = decode_workflow_rows(source, frame)
+    finally:
+        dconn.close()
+    return {
+        "status": "ok", "source": source, "rows": rows, "total": total,
+        "page": page, "page_size": effective_size, "per_page": effective_size,
+        "total_pages": (total + effective_size - 1) // effective_size if total else 0,
+        "workflow_id": workflow_id or 'default', "periode": periode,
+    }
+
+
+@app.get("/api/workflow/calculation-input")
+def get_workflow_calculation_input(
+    workflow_id: str = Query(..., min_length=1, max_length=200),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(500, ge=1, le=500),
+) -> dict:
+    """Return one verified page of canonical raw input for the active workflow.
+
+    UI list pagination remains bounded.  The calculation client may walk every
+    page explicitly, but can never read another workflow or an incomplete import.
+    """
+    dconn = workflow_read_cursor()
+    try:
+        config = read_workflow_config(dconn) or {}
+        workflow = config.get('_workflow') if isinstance(config.get('_workflow'), dict) else {}
+        active_workflow_id = str(
+            workflow.get('workflow_id') or workflow.get('workflowId') or 'default'
+        ).strip() or 'default'
+        if workflow_id != active_workflow_id:
+            raise HTTPException(409, detail={
+                'code': 'WORKFLOW_SCOPE_MISMATCH',
+                'message': 'Input kalkulasi bukan milik workflow aktif.',
+                'requested_workflow_id': workflow_id,
+                'active_workflow_id': active_workflow_id,
+            })
+        columns = workflow_table_columns(dconn, WORKFLOW_TABLES['raw_import'])
+        if not columns or columns == ['_empty']:
+            raise HTTPException(409, detail={
+                'code': 'IMPORT_NOT_PERSISTED',
+                'message': 'Data sumber impor canonical belum tersimpan.',
+            })
+        lower = {column.lower(): column for column in columns}
+        workflow_column = next(
+            (lower[name] for name in WORKFLOW_ID_COLUMNS if name in lower), None
+        )
+        where_sql = ''
+        params: list[Any] = []
+        if workflow_column:
+            where_sql = f' WHERE CAST("{workflow_column}" AS VARCHAR)=?'
+            params.append(workflow_id)
+        persisted_rows = int(dconn.execute(
+            f'SELECT COUNT(*) FROM "{WORKFLOW_TABLES["raw_import"]}"{where_sql}', params
+        ).fetchone()[0])
+        stats = workflow.get('importStats') if isinstance(workflow.get('importStats'), dict) else {}
+        expected_source_rows = int(stats.get('totalRaw') or persisted_rows or 0)
+        expected_calculation_rows = int(stats.get('totalRecord') or expected_source_rows or 0)
+        declared_status = str(workflow.get('importStatus') or '').upper()
+        complete = persisted_rows > 0 and persisted_rows == expected_source_rows
+        if declared_status and declared_status != 'COMPLETE':
+            complete = False
+        if not complete:
+            raise HTTPException(409, detail={
+                'code': 'IMPORT_INCOMPLETE',
+                'message': 'Impor aktif belum tersimpan lengkap pada penyimpanan canonical.',
+                'workflow_id': active_workflow_id,
+                'expected_source_rows': expected_source_rows,
+                'persisted_source_rows': persisted_rows,
+                'import_status': declared_status or 'INCOMPLETE',
+            })
+        offset = (page - 1) * page_size
+        frame = dconn.execute(
+            f'SELECT * FROM "{WORKFLOW_TABLES["raw_import"]}"{where_sql} '
+            'ORDER BY rowid LIMIT ? OFFSET ?', params + [page_size, offset]
+        ).fetchdf()
+        rows = decode_workflow_rows('raw_import', frame)
+        total_pages = (persisted_rows + page_size - 1) // page_size
+        return {
+            'status': 'ok', 'stage': 'CALCULATION_INPUT', 'import_status': 'COMPLETE',
+            'workflow_id': active_workflow_id, 'periode': workflow.get('month'),
+            'periods': stats.get('months') if isinstance(stats.get('months'), list) else [],
+            'expected_source_rows': expected_source_rows,
+            'persisted_source_rows': persisted_rows,
+            'expected_calculation_rows': expected_calculation_rows,
+            'rows': rows, 'page': page, 'page_size': page_size,
+            'total': persisted_rows, 'total_pages': total_pages,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception('Calculation input hydration failed for workflow=%s page=%s',
+                         workflow_id, page)
+        raise HTTPException(500, detail={
+            'code': 'CALCULATION_INPUT_ERROR',
+            'message': 'Backend gagal membaca input kalkulasi dari penyimpanan canonical.',
+            'stage': 'CALCULATION_INPUT',
+        }) from exc
+    finally:
+        dconn.close()
+
+
+@app.get("/api/workflow/detail/{source}/{row_id}")
+def get_workflow_detail(source: str, row_id: int) -> dict:
+    """Fetch the full payload for one selected row only."""
+    table = WORKFLOW_WRITABLE.get(source)
+    if not table:
+        raise HTTPException(404, f"Sumber workflow tidak ditemukan: {source}")
+    with workflow_read_cursor() as dconn:
+        columns = workflow_table_columns(dconn, table)
+        if not columns or columns == ['_empty']:
+            raise HTTPException(404, 'Record tidak ditemukan')
+        frame = dconn.execute(
+            f'SELECT rowid AS _row_id,* FROM "{table}" WHERE rowid=? LIMIT 1', [row_id]
+        ).fetchdf()
+    rows = decode_workflow_rows(source, frame)
+    if not rows:
+        raise HTTPException(404, 'Record tidak ditemukan')
+    return {'status': 'ok', 'source': source, 'row': rows[0]}
+
+
+@app.get("/api/workflow/summary/{source}")
+def get_workflow_summary(source: str, periode: Optional[str] = Query(None),
+                         workflow_id: Optional[str] = Query('default')) -> dict:
+    """Return bounded KPI aggregates without materializing workflow rows."""
+    periode = periode if isinstance(periode, str) else None
+    workflow_id = workflow_id if isinstance(workflow_id, str) else 'default'
+    table = WORKFLOW_WRITABLE.get(source)
+    if not table:
+        raise HTTPException(404, f"Sumber workflow tidak ditemukan: {source}")
+    with workflow_read_cursor() as dconn:
+        columns = workflow_table_columns(dconn, table)
+        if not columns or columns == ['_empty']:
+            return {'status': 'ok', 'source': source, 'summary': {
+                'total': 0, 'distinct_sdm': 0, 'valid': 0, 'invalid': 0,
+                'total_potongan': 0.0, 'total_nominal': 0.0,
+            }, 'by_status': []}
+        where_sql, params = workflow_scope_sql(source, columns, periode, workflow_id)
+        lower = {column.lower(): column for column in columns}
+        status_column = next((lower[name] for name in
+                              ('status', 'statuslengkap', 'review_status', 'validation_status')
+                              if name in lower), None)
+        nip_expr = f'COUNT(DISTINCT "{lower["nip"]}")' if 'nip' in lower else '0'
+        pot_column = next((lower[name] for name in ('total', 'totalharian', 'potpct') if name in lower), None)
+        nominal_column = next((lower[name] for name in
+                               ('finaldibayar', 'final_tukin_dibayar', 'nominal', 'paid')
+                               if name in lower), None)
+        if status_column:
+            normalized = f'upper(coalesce(CAST("{status_column}" AS VARCHAR), \'\'))'
+            valid_expr = (f"SUM(CASE WHEN {normalized} IN "
+                          "('VALID','LENGKAP','BERSIH','APPROVED','DONE') THEN 1 ELSE 0 END)")
+            invalid_expr = (f"SUM(CASE WHEN {normalized} IN "
+                            "('INVALID','TIDAK LENGKAP','REJECTED','FAILED') THEN 1 ELSE 0 END)")
+        else:
+            valid_expr = 'COUNT(*)'
+            invalid_expr = '0'
+        result = dconn.execute(
+            f'SELECT COUNT(*),{nip_expr},{valid_expr},{invalid_expr},'
+            f'{f"coalesce(SUM(try_cast(\"{pot_column}\" AS DOUBLE)),0)" if pot_column else "0"},'
+            f'{f"coalesce(SUM(try_cast(\"{nominal_column}\" AS DOUBLE)),0)" if nominal_column else "0"} '
+            f'FROM "{table}"{where_sql}', params
+        ).fetchone()
+        by_status = []
+        if status_column:
+            status_rows = dconn.execute(
+                f'SELECT CAST("{status_column}" AS VARCHAR) status,COUNT(*) total '
+                f'FROM "{table}"{where_sql} GROUP BY 1 ORDER BY total DESC', params
+            ).fetchall()
+            by_status = [{'status': row[0], 'total': int(row[1])} for row in status_rows]
+    keys = ('total', 'distinct_sdm', 'valid', 'invalid', 'total_potongan', 'total_nominal')
+    summary = dict(zip(keys, result))
+    for key in ('total', 'distinct_sdm', 'valid', 'invalid'):
+        summary[key] = int(summary[key] or 0)
+    for key in ('total_potongan', 'total_nominal'):
+        summary[key] = float(summary[key] or 0)
+    return {'status': 'ok', 'source': source, 'summary': summary, 'by_status': by_status}
 
 
 @app.get("/api/master-sdm")
@@ -940,16 +1492,31 @@ def sync_workflow_table(payload: dict[str, Any]) -> dict:
     ensure_duckdb_master_schema()
     replace = bool(payload.get("replace", False))
     frame = prepare_workflow_frame(source, rows) if rows else None
+    requested_workflow_id = str(payload.get('workflow_id') or 'default').strip() or 'default'
+    requested_period = str(payload.get('periode') or '').strip() or None
 
     import duckdb as _duckdb
     dconn = _duckdb.connect(DUCKDB_PATH)
     try:
         dconn.execute('BEGIN TRANSACTION')
-        if replace:
-            dconn.execute(f'DROP TABLE IF EXISTS "{table}"')
+        target_columns = workflow_table_columns(dconn, table)
+        scoped_where = ''
+        scoped_params: list[str] = []
+        if target_columns and target_columns != ['_empty']:
+            target_lower = {column.lower() for column in target_columns}
+            if any(name in target_lower for name in WORKFLOW_ID_COLUMNS):
+                scoped_where, scoped_params = workflow_scope_sql(
+                    source, target_columns, requested_period, requested_workflow_id
+                )
         if rows:
             dconn.register('tmp_frame', frame)
-            if replace:
+            if replace and scoped_where:
+                dconn.execute(f'DELETE FROM "{table}"{scoped_where}', scoped_params)
+                insert_relation_by_name(
+                    dconn, table, 'tmp_frame',
+                    optional_columns=WORKFLOW_OPTIONAL_COLUMNS.get(source, {}).keys(),
+                )
+            elif replace:
                 create_table_from_relation(dconn, table, 'tmp_frame')
             else:
                 exists = dconn.execute(
@@ -964,9 +1531,16 @@ def sync_workflow_table(payload: dict[str, Any]) -> dict:
                 dconn.unregister('tmp_frame')
             except Exception:
                 pass
+        elif replace and scoped_where:
+            dconn.execute(f'DELETE FROM "{table}"{scoped_where}', scoped_params)
         elif replace:
-            dconn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" (_empty TEXT)')
-        cnt = dconn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            dconn.execute(f'CREATE OR REPLACE TABLE "{table}" (_empty TEXT)')
+        # Chunk clients verify the active workflow count after every append.
+        # Returning the whole shared table count breaks as soon as another
+        # auditable workflow/import is retained in the canonical table.
+        cnt = dconn.execute(
+            f'SELECT COUNT(*) FROM "{table}"{scoped_where}', scoped_params
+        ).fetchone()[0]
         dconn.commit()
     except Exception:
         dconn.rollback()
@@ -984,7 +1558,9 @@ def sync_workflow_table(payload: dict[str, Any]) -> dict:
     finally:
         conn.close()
 
-    return {"status": "ok", "source": source, "rows": len(rows), "replace": replace}
+    return {"status": "ok", "source": source, "rows": len(rows), "total_rows": int(cnt),
+            "replace": replace, "workflow_id": requested_workflow_id,
+            "periode": requested_period}
 
 
 @app.post("/api/workflow/mark-semifinal")
@@ -1545,6 +2121,7 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
         col_nip = pick(['nip', 'n'])
         col_nama = pick(['nama', 'name'])
         col_tanggal = pick(['tanggal', 'tgl', 'date'])
+        col_tanggal_pulang = pick(['tanggalpulang', 'tglpulang', 'tanggalkeluar'])
         col_jam_masuk = pick(['jammansuk', 'jammasuk', 'masuk', 'jammasuk'])
         col_jam_pulang = pick(['jampulang', 'pulang', 'jampulang'])
         col_zona = pick(['zona', 'zone'])
@@ -1574,15 +2151,24 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
         else:
             df['pulangMin'] = np.nan
 
+        if col_tanggal_pulang and col_tanggal_pulang in df.columns:
+            out_dates = pd.to_datetime(df[col_tanggal_pulang], dayfirst=True, errors='coerce')
+            df['crossDay'] = out_dates.dt.normalize().gt(df[col_tanggal].dt.normalize())
+        else:
+            df['crossDay'] = False
+        df['crossDay'] = df['crossDay'] | (
+            df['masukMin'].notna() & df['pulangMin'].notna() & (df['pulangMin'] < df['masukMin'])
+        )
+
         df['zona'] = df[col_zona] if (col_zona and col_zona in df.columns) else 'WIB'
         df['zona'] = df['zona'].fillna('WIB').astype(str).str.upper()
 
         zone_offset = {'WIB': 0, 'WITA': -60, 'WIT': -120}
         zone_offset_add = {'WIB': 0, 'WITA': 60, 'WIT': 120}
-        df['masukNormMin'] = df['masukMin'] + df['zona'].map(lambda z: zone_offset.get(z, 0))
-        df['pulangNormMin'] = df['pulangMin'] + df['zona'].map(lambda z: zone_offset.get(z, 0))
-        df['masukNormMinAdd'] = df['masukMin'] + df['zona'].map(lambda z: zone_offset_add.get(z, 0))
-        df['pulangNormMinAdd'] = df['pulangMin'] + df['zona'].map(lambda z: zone_offset_add.get(z, 0))
+        df['masukNormMin'] = (df['masukMin'] + df['zona'].map(lambda z: zone_offset.get(z, 0))) % 1440
+        df['pulangNormMin'] = (df['pulangMin'] + df['zona'].map(lambda z: zone_offset.get(z, 0))) % 1440
+        df['masukNormMinAdd'] = (df['masukMin'] + df['zona'].map(lambda z: zone_offset_add.get(z, 0))) % 1440
+        df['pulangNormMinAdd'] = (df['pulangMin'] + df['zona'].map(lambda z: zone_offset_add.get(z, 0))) % 1440
 
         # Prepare output table: create and remove existing bulan rows
         conn.execute('CREATE TABLE IF NOT EXISTS hitung_harian (nip TEXT, nama TEXT, jabatan TEXT, bulan TEXT, tanggal TEXT, zona TEXT, jamMasuk TEXT, jamPulang TEXT, durasi TEXT, jamNormalisasi TEXT, jamMasukAsli TEXT, jamPulangAsli TEXT, durasiMin REAL, metode TEXT, jenis TEXT, statusHariLibur TEXT, statusCuti TEXT, statusDuplikasi TEXT, statusLengkap TEXT, potKeterlambatan REAL, potPulangCepat REAL, potDurasi REAL, potTidakLengkap REAL, totalHarian REAL, flags TEXT)')
@@ -1679,7 +2265,8 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
                 chunk['useMasuk'] = chunk['masukMin']
                 chunk['usePulang'] = chunk['pulangMin']
 
-            chunk['durasiMin'] = chunk['usePulang'] - chunk['useMasuk']
+            chunk['actualPulang'] = chunk['usePulang'] + chunk['crossDay'].astype(int) * 1440
+            chunk['durasiMin'] = (chunk['actualPulang'] - chunk['useMasuk']).clip(lower=0)
 
             # holiday/ weekend
             chunk['isHoliday'] = chunk[col_tanggal].dt.strftime('%Y-%m-%d').isin(holiday_set) | chunk[col_tanggal].dt.weekday.isin([5, 6])
@@ -1687,14 +2274,8 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
 
             # jabatan & metode
             def resolve_jabatan_row(r):
-                nip = str(r.get(col_nip) or '').strip()
-                peg = peg_by_nip.get(nip)
-                if peg and peg.get('jabatan'):
-                    return str(peg.get('jabatan')).strip()
-                j = r.get('jabatan') or r.get('jabatan')
-                if j:
-                    return str(j).strip()
-                return 'Belum Ditentukan'
+                j = r.get('jabatan')
+                return (str(j).strip() if pd.notna(j) else '') or 'Belum Ditentukan'
 
             chunk['jabatan_resolved'] = chunk.apply(resolve_jabatan_row, axis=1)
             chunk['metode'] = chunk['jabatan_resolved'].map(lambda j: 'durasi' if jab_method.get(str(j).strip().lower()) == 'durasi' else 'reguler')
@@ -1730,6 +2311,10 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
                     chunk.at[idx, 'flags'] += 'JENIS BEBAS POTONGAN; '
                     chunk.at[idx, 'totalHarian'] = 0.0
                     continue
+                if r.get('crossDay') and r['statusLengkap'] == 'Lengkap':
+                    chunk.at[idx, 'flags'] += 'PULANG HARI BERIKUTNYA; '
+                    chunk.at[idx, 'totalHarian'] = 0.0
+                    continue
                 if r['metode'] == 'durasi':
                     dur_hours = (r.get('durasiMin') or 0) / 60.0
                     pct = durasi_tier_pct(dur_hours, cfg.get('minDurasiJam', 7.5))
@@ -1744,7 +2329,7 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
                         pulang_std = int(jd.get('pulang', '16:00').split(':')[0]) * 60 + int(jd.get('pulang', '16:00').split(':')[1])
 
                         lateMin = max(0, (r.get('useMasuk') or 0) - masuk_std)
-                        earlyMin = max(0, pulang_std - (r.get('usePulang') or 0))
+                        earlyMin = max(0, pulang_std - (r.get('actualPulang') or 0))
 
                         # FLEXI
                         fx = cfg.get('flexi', {}) or {}
@@ -1752,7 +2337,7 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
                             fStart = int(fx.get('masukStart', '07:31').split(':')[0]) * 60 + int(fx.get('masukStart', '07:31').split(':')[1])
                             fEnd = int(fx.get('masukEnd', '08:00').split(':')[0]) * 60 + int(fx.get('masukEnd', '08:00').split(':')[1])
                             komp = int(fx.get('kompensasiJumat' if is_jumat else 'kompensasiSenKam', '16:30').split(':')[0]) * 60 + int(fx.get('kompensasiJumat' if is_jumat else 'kompensasiSenKam', '16:30').split(':')[1])
-                            if (r.get('useMasuk') or 0) >= fStart and (r.get('useMasuk') or 0) <= fEnd and (r.get('usePulang') or 0) > komp:
+                            if (r.get('useMasuk') or 0) >= fStart and (r.get('useMasuk') or 0) <= fEnd and (r.get('actualPulang') or 0) > komp:
                                 lateMin = 0
                                 earlyMin = 0
                                 chunk.at[idx, 'flags'] += 'FLEXI TIME (kompensasi); '
@@ -1917,14 +2502,8 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
         else:
             dconn.execute("CREATE TEMPORARY TABLE _leave AS SELECT * FROM (VALUES ('','','','')) AS v(nip, mulai, selesai, jenis) WHERE FALSE")
 
-        # build tiers SQL
-        late_case = build_tier_case('lateMin', cfg.get('keterlambatanTiers', []))
-        early_case = build_tier_case('earlyMin', cfg.get('pulangCepatTiers', []))
-
         # build durasi CASE based on minDurasi
         minDur = float(cfg.get('minDurasiJam', 7.5))
-        # emulate durasi_tier_pct JS function
-        durasi_case = f"CASE WHEN hours >= {minDur} THEN 0 WHEN hours >= {minDur - 0.5} THEN 0.5 WHEN hours >= {minDur - 1.0} THEN 1 WHEN hours >= {minDur - 1.5} THEN 1.5 WHEN hours >= {minDur - 2.0} THEN 2 ELSE 3 END"
 
         # parse jamDasar and flexi constants
         jd_senkam_masuk = cfg.get('jamDasar', {}).get('senKam', {}).get('masuk', '07:30')
@@ -1958,9 +2537,12 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
             potTidakLengkap DOUBLE, totalHarian DOUBLE, flags TEXT
         )''')
 
+        raw_columns = {str(name).lower(): str(name) for name in
+                       dconn.execute('SELECT * FROM raw_import LIMIT 0').fetchdf().columns}
+
         # compute total rows to process
         count_q = f"SELECT COUNT(*) AS c FROM raw_import WHERE substr(tanggal,1,7) = '{bulan}'"
-        if unit and unit != '' and 'unit' in dconn.execute("SELECT * FROM raw_import LIMIT 1").columns:
+        if unit and unit != '' and 'unit' in raw_columns:
             count_q = f"SELECT COUNT(*) AS c FROM raw_import WHERE substr(tanggal,1,7) = '{bulan}' AND unit = '{unit}'"
         total = dconn.execute(count_q).fetchone()[0]
         if total == 0:
@@ -1986,6 +2568,79 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
                 use_masuk_expr = 'masukMin'
                 use_pulang_expr = 'pulangMin'
 
+            out_date_column = next((raw_columns[name] for name in
+                                    ('tanggal_pulang', 'tanggalpulang', 'tglpulang', 'tanggalkeluar')
+                                    if name in raw_columns), None)
+            if out_date_column:
+                safe_out_date = '"' + out_date_column.replace('"', '""') + '"'
+                out_date_is_later = (
+                    f"coalesce(try_cast({safe_out_date} AS DATE) > try_cast(tanggal AS DATE), FALSE)"
+                )
+            else:
+                out_date_is_later = 'FALSE'
+            cross_day_expr = (
+                f"(({use_pulang_expr} < {use_masuk_expr}) OR ({out_date_is_later}))"
+            )
+            actual_pulang_expr = (
+                f"CASE WHEN {cross_day_expr} THEN {use_pulang_expr} + 1440 "
+                f"ELSE {use_pulang_expr} END"
+            )
+            duration_expr = f"greatest(0, {actual_pulang_expr} - {use_masuk_expr})"
+            hours_expr = f"({duration_expr} / 60.0)"
+            is_friday_expr = "strftime('%w', try_cast(tanggal AS DATE)) = '5'"
+            standard_in_expr = (
+                f"CASE WHEN {is_friday_expr} THEN {jum_masuk_min} ELSE {sen_masuk_min} END"
+            )
+            standard_out_expr = (
+                f"CASE WHEN {is_friday_expr} THEN {jum_pulang_min} ELSE {sen_pulang_min} END"
+            )
+            late_min_expr = f"greatest(0, {use_masuk_expr} - {standard_in_expr})"
+            early_min_expr = f"greatest(0, {standard_out_expr} - {actual_pulang_expr})"
+            late_case = build_tier_case(late_min_expr, cfg.get('keterlambatanTiers', []))
+            early_case = build_tier_case(early_min_expr, cfg.get('pulangCepatTiers', []))
+            durasi_case = (
+                f"CASE WHEN {hours_expr} >= {minDur} THEN 0 "
+                f"WHEN {hours_expr} >= {minDur - 0.5} THEN 0.5 "
+                f"WHEN {hours_expr} >= {minDur - 1.0} THEN 1 "
+                f"WHEN {hours_expr} >= {minDur - 1.5} THEN 1.5 "
+                f"WHEN {hours_expr} >= {minDur - 2.0} THEN 2 ELSE 3 END"
+            )
+            duration_jobs = [
+                str(item.get('nama') or '').strip().lower()
+                for item in (cfg.get('jabatanMaster') or [])
+                if isinstance(item, dict) and item.get('metode') == 'durasi' and item.get('nama')
+            ]
+            duration_job_values = ', '.join(
+                "'" + name.replace("'", "''") + "'" for name in duration_jobs
+            )
+            duration_method_expr = (
+                f"lower(coalesce(jabatan, '')) IN ({duration_job_values})"
+                if duration_job_values else 'FALSE'
+            )
+            complete_expr = f"({use_masuk_expr} IS NOT NULL AND {use_pulang_expr} IS NOT NULL)"
+            late_pct_expr = (
+                f"CASE WHEN {complete_expr} AND NOT ({cross_day_expr}) AND NOT ({duration_method_expr}) "
+                f"AND {late_min_expr} > 0 THEN ({late_case}) ELSE 0 END"
+            )
+            early_pct_expr = (
+                f"CASE WHEN {complete_expr} AND NOT ({cross_day_expr}) AND NOT ({duration_method_expr}) "
+                f"AND {early_min_expr} > 0 THEN ({early_case}) ELSE 0 END"
+            )
+            duration_pct_expr = (
+                f"CASE WHEN {complete_expr} AND NOT ({cross_day_expr}) AND ({duration_method_expr}) "
+                f"THEN ({durasi_case}) ELSE 0 END"
+            )
+            incomplete_pct_expr = (
+                f"CASE WHEN NOT {complete_expr} THEN {cfg.get('potonganTidakLengkap', 3)} ELSE 0 END"
+            )
+            total_pct_expr = (
+                f"({incomplete_pct_expr} + {late_pct_expr} + "
+                f"{early_pct_expr} + {duration_pct_expr})"
+            )
+            flags_expr = (
+                f"CASE WHEN {cross_day_expr} THEN 'PULANG HARI BERIKUTNYA' ELSE '' END"
+            )
+
             # Query to compute chunk
             sql = f"""INSERT INTO hitung_harian (
                       nip, nama, jabatan, bulan, tanggal, zona, jamMasuk, jamPulang,
@@ -1994,29 +2649,29 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
                       statusLengkap, potTidakLengkap, potKeterlambatan,
                       potPulangCepat, potDurasi, totalHarian, flags
                   ) """ \
-                  f"SELECT nip, nama, COALESCE(jabatan, '') AS jabatan, substr(tanggal,1,7) AS bulan, tanggal::DATE AS tanggal, zona, " \
+                  f"SELECT raw_import.nip AS nip, raw_import.nama AS nama, COALESCE(raw_import.jabatan, '') AS jabatan, substr(raw_import.tanggal,1,7) AS bulan, raw_import.tanggal::DATE AS tanggal, raw_import.zona, " \
                   f"printf('%02d:%02d', CAST(({use_masuk_expr} / 60) AS INTEGER), CAST(({use_masuk_expr} % 60) AS INTEGER)) AS jamMasuk, " \
                   f"printf('%02d:%02d', CAST(({use_pulang_expr} / 60) AS INTEGER), CAST(({use_pulang_expr} % 60) AS INTEGER)) AS jamPulang, " \
-                  f"printf('%dh %dm', CAST((({use_pulang_expr} - {use_masuk_expr}) / 60) AS INTEGER), CAST((({use_pulang_expr} - {use_masuk_expr}) % 60) AS INTEGER)) AS durasi, " \
+                  f"printf('%dh %dm', CAST(({duration_expr} / 60) AS INTEGER), CAST(({duration_expr} % 60) AS INTEGER)) AS durasi, " \
                   f"CASE WHEN '{time_mode}' = 'original' THEN 'Original' WHEN zona = 'WIB' THEN '' WHEN '{time_mode}' = 'wib' THEN printf('%02d:%02d', CAST((masukNormMin/60) AS INTEGER), CAST((masukNormMin%60) AS INTEGER)) || ' - ' || printf('%02d:%02d', CAST((pulangNormMin/60) AS INTEGER), CAST((pulangNormMin%60) AS INTEGER)) WHEN '{time_mode}' = 'wib-add' THEN printf('%02d:%02d', CAST((masukNormMinAdd/60) AS INTEGER), CAST((masukNormMinAdd%60) AS INTEGER)) || ' - ' || printf('%02d:%02d', CAST((pulangNormMinAdd/60) AS INTEGER), CAST((pulangNormMinAdd%60) AS INTEGER)) ELSE '' END AS jamNormalisasi, " \
                   f"printf('%02d:%02d', CAST((masukMin/60) AS INTEGER), CAST((masukMin%60) AS INTEGER)) AS jamMasukAsli, " \
                   f"printf('%02d:%02d', CAST((pulangMin/60) AS INTEGER), CAST((pulangMin%60) AS INTEGER)) AS jamPulangAsli, " \
-                  f"({use_pulang_expr} - {use_masuk_expr})::DOUBLE AS durasiMin, " \
-                  f"CASE WHEN (COALESCE(jabatan, '') <> '' AND lower(jabatan) IN ({', '.join([f"'{k.strip().lower()}'" for k in (cfg.get('jabatanMaster') or []) if isinstance(k, dict) and k.get('nama')])}) ) THEN 'durasi' ELSE 'reguler' END AS metode, " \
-                  f"COALESCE(jenis, '') AS jenis, " \
+                  f"({duration_expr})::DOUBLE AS durasiMin, " \
+                  f"CASE WHEN ({duration_method_expr}) THEN 'durasi' ELSE 'reguler' END AS metode, " \
+                  f"COALESCE(raw_import.jenis, '') AS jenis, " \
                   f"CASE WHEN substr(tanggal,1,10) IN ({', '.join([f"'{h.get('d')}'" for h in (cfg.get('holidays') or []) if isinstance(h, dict) and h.get('d')])}) THEN 'Ya' ELSE 'Tidak' END AS statusHariLibur, " \
                   f"COALESCE(lp.jenis, '') AS statusCuti, " \
                   f"FALSE AS statusDuplikasi, " \
                   f"CASE WHEN {use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL THEN 'Tidak Lengkap' ELSE 'Lengkap' END AS statusLengkap, " \
-                  f"CASE WHEN {use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL THEN {cfg.get('potonganTidakLengkap', 3)} ELSE 0 END AS potTidakLengkap, " \
-                  f"(CASE WHEN ({use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL) THEN 0 ELSE ({late_case}) END) AS potKeterlambatan, " \
-                  f"(CASE WHEN ({use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL) THEN 0 ELSE ({early_case}) END) AS potPulangCepat, " \
-                  f"(CASE WHEN (COALESCE(jabatan, '') <> '' AND lower(jabatan) IN ({', '.join([f"'{k.strip().lower()}'" for k in (cfg.get('jabatanMaster') or []) if isinstance(k, dict) and k.get('nama')])}) ) THEN ({durasi_case}) ELSE 0 END) AS potDurasi, " \
-                  f"((CASE WHEN {use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL THEN {cfg.get('potonganTidakLengkap', 3)} ELSE 0 END) + (CASE WHEN ({use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL) THEN 0 ELSE ({late_case}) END) + (CASE WHEN ({use_masuk_expr} IS NULL OR {use_pulang_expr} IS NULL) THEN 0 ELSE ({early_case}) END) + (CASE WHEN (COALESCE(jabatan, '') <> '' AND lower(jabatan) IN ({', '.join([f"'{k.strip().lower()}'" for k in (cfg.get('jabatanMaster') or []) if isinstance(k, dict) and k.get('nama')])}) ) THEN ({durasi_case}) ELSE 0 END))::DOUBLE AS totalHarian, " \
-                  f"'' AS flags " \
+                  f"({incomplete_pct_expr}) AS potTidakLengkap, " \
+                  f"({late_pct_expr}) AS potKeterlambatan, " \
+                  f"({early_pct_expr}) AS potPulangCepat, " \
+                  f"({duration_pct_expr}) AS potDurasi, " \
+                  f"({total_pct_expr})::DOUBLE AS totalHarian, " \
+                  f"{flags_expr} AS flags " \
                   f"FROM raw_import LEFT JOIN _leave lp ON (CAST(raw_import.nip AS TEXT) = CAST(lp.nip AS TEXT) AND raw_import.tanggal::DATE BETWEEN lp.mulai::DATE AND lp.selesai::DATE) " \
-                  f"WHERE substr(tanggal,1,7) = '{bulan}' "
-            if unit and unit != '' and 'unit' in dconn.execute('SELECT * FROM raw_import LIMIT 1').columns:
+                  f"WHERE substr(raw_import.tanggal,1,7) = '{bulan}' "
+            if unit and unit != '' and 'unit' in raw_columns:
                 sql += f" AND unit = '{unit}' "
             sql += f" LIMIT {limit} OFFSET {offset}"
 
@@ -2043,13 +2698,20 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
 
 
 @database_job
-def run_compute_harian_job(job_id: str, bulan: str, time_mode: str, unit: Optional[str]):
+def run_compute_harian_job(job_id: str, bulan: str, time_mode: str, unit: Optional[str],
+                           job_generation: int):
     # Called in background process
     try:
+        # Revalidate only after the worker owns DATABASE_GATE. A reset that won
+        # the gate after dispatch invalidates this job before its first write.
+        assert_current_generation(job_generation)
         _update_job(job_id, status='running', started_at=_now_iso(), progress=0.0, message='Started')
         # Run compute using DuckDB SQL
-        rows = compute_harian_duckdb(job_id, bulan, timeMode, unit)
+        rows = compute_harian_duckdb(job_id, bulan, time_mode, unit)
         _update_job(job_id, status='finished', finished_at=_now_iso(), progress=1.0, message='Completed', result_table='hitung_harian', row_count=rows)
+    except StaleGenerationError as exc:
+        _update_job(job_id, status='stale_after_reset', finished_at=_now_iso(), progress=0.0,
+                    message='STALE_AFTER_RESET: ' + str(exc))
     except Exception as exc:
         import traceback
         tb = traceback.format_exc()
@@ -2060,7 +2722,9 @@ def run_compute_harian_job(job_id: str, bulan: str, time_mode: str, unit: Option
 def api_compute_harians(bulan: str = Query(..., description='Bulan contoh: 2026-08'), timeMode: str = Query('original'), unit: Optional[str] = Query(None)):
     """Start an asynchronous compute job for hitung_harian."""
     job_id = str(uuid.uuid4())
-    payload = {'bulan': bulan, 'timeMode': timeMode, 'unit': unit}
+    job_generation = current_reset_generation()
+    payload = {'bulan': bulan, 'timeMode': timeMode, 'unit': unit,
+               'reset_generation': job_generation}
     conn = get_connection()
     try:
         ensure_jobs_table(conn)
@@ -2069,7 +2733,7 @@ def api_compute_harians(bulan: str = Query(..., description='Bulan contoh: 2026-
     finally:
         conn.close()
     # Keep DuckDB jobs in the server process and preserve queue cancellation.
-    future = _executor.submit(run_compute_harian_job, job_id, bulan, timeMode, unit)
+    future = _executor.submit(run_compute_harian_job, job_id, bulan, timeMode, unit, job_generation)
     _job_futures[job_id] = future
     return {'job_id': job_id, 'status': 'queued'}
 
@@ -2214,11 +2878,16 @@ def api_retry_job(job_id: str):
         except Exception:
             payload_obj = {}
         new_job_id = str(uuid.uuid4())
+        job_generation = current_reset_generation()
+        payload_obj['reset_generation'] = job_generation
         ensure_jobs_table(conn)
         conn.execute('INSERT INTO jobs (id, type, status, payload, progress, message) VALUES (?, ?, ?, ?, ?, ?)', (new_job_id, row['type'] or 'hitung_harian', 'queued', json.dumps(payload_obj, ensure_ascii=False), 0.0, 'Retried'))
         conn.commit()
         # submit
-        _job_futures[new_job_id] = _executor.submit(run_compute_harian_job, new_job_id, payload_obj.get('bulan'), payload_obj.get('timeMode', 'original'), payload_obj.get('unit'))
+        _job_futures[new_job_id] = _executor.submit(
+            run_compute_harian_job, new_job_id, payload_obj.get('bulan'),
+            payload_obj.get('timeMode', 'original'), payload_obj.get('unit'), job_generation
+        )
         return {'job_id': new_job_id, 'status': 'queued'}
     finally:
         conn.close()

@@ -114,9 +114,14 @@ Kolom minimal (nama kolom fleksibel, dikenali otomatis):
 **CSV lintas hari:** Jika absensi melewati tengah malam (mis. masuk 10/08 22:00, pulang 11/08 06:00),
 tanggal kerja tetap **tanggal jam masuk (10/08)**, durasi dihitung lintas tengah malam (8 jam).
 Record tidak dipindahkan ke tanggal 11.
+Jika jam masuk dan jam pulang lengkap serta pulang pada hari berikutnya, potongan harian **0%**
+untuk metode Reguler maupun Durasi. Jika salah satu jam kosong, aturan absensi tidak lengkap tetap berlaku.
 
 **Master Pegawai** (Konfigurasi → tab Master Pegawai), format: `NIP, Nama, Jabatan, Tukin` (Tukin Bruto).
-Digunakan untuk menentukan metode jabatan & nilai Tukin pada Final.
+Digunakan sebagai data pegawai dan nilai Tukin pada Final.
+Jabatan untuk Hitung Harian mengikuti kolom jabatan workbook absensi terbaru, tanpa ditimpa
+Master Pegawai. Kolom jabatan kosong ditampilkan sebagai `Belum Ditentukan`.
+Metode Reguler/Durasi mengikuti pemetaan Master Jabatan pada Konfigurasi.
 
 > Contoh file tersedia di `assets/data/contoh_absensi.csv` dan `assets/data/contoh_pegawai.csv`.
 

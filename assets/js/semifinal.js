@@ -15,6 +15,7 @@
   }
 
   mod.recalcChain = async function () {
+    if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['processed_data', 'daily_data']);
     if (EVKIN.progress) EVKIN.progress({title: 'Hitung Ulang Semi Final', percent: 0, message: 'Menyiapkan perhitungan ulang...'});
     recomputeDup();
     await EVKIN.harianMod.process({sync:false});
@@ -135,6 +136,7 @@
       const previous = S.semifinalVerified;
       const previousRows = S.semifinal;
       try {
+        if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['processed_data', 'daily_data']);
         EVKIN.assertDailyCoverage();
         const seen = new Set();
         for (const row of S.daily) {
@@ -144,11 +146,16 @@
         }
         S.semifinal = S.daily.map(row => ({...row}));
         if (EVKIN.progress) EVKIN.progress({title: 'Verifikasi Semi Final', percent: 70, message: 'Menyimpan status verifikasi...'});
-        await EVKIN.syncBackendWorkflow(undefined, {derivedOnly:true});
         if (EVKIN.exportBackend && EVKIN.exportBackend.markSemifinalVerified) {
-          await EVKIN.exportBackend.markSemifinalVerified(S.month);
+          // The canonical daily result is already persisted by Hitung Harian.
+          // Verification is a lightweight, idempotent backend operation; do
+          // not upload every derived workflow table again just to set a flag.
+          await EVKIN.exportBackend.markSemifinalVerified({bulan:S.month, timeoutMs:60000});
         }
         S.semifinalVerified = true;
+        if (S.workflowMeta && S.workflowMeta.total_row_counts) {
+          S.workflowMeta.total_row_counts.semifinal = S.semifinal.length;
+        }
         if (EVKIN.progress) EVKIN.progress({title: 'Verifikasi Semi Final', percent: 100, message: 'Semi Final berhasil diverifikasi.', state: 'done'});
         EVKIN.auditMod.logStage('semifinal', 'VERIFIED');
         EVKIN.toast('Semi Final terverifikasi dan tersimpan — Rekap SDM terbuka');
@@ -165,8 +172,10 @@
 
     const btnPrev = el.querySelector('#btnPrev');
     const btnNext = el.querySelector('#btnNext');
-    if (btnPrev) btnPrev.onclick = () => { S.semifinalPage = Math.max(0, S.semifinalPage - 1); EVKIN.save(); EVKIN.go('semifinal'); };
-    if (btnNext) btnNext.onclick = () => { S.semifinalPage = Math.min(totalPages - 1, S.semifinalPage + 1); EVKIN.save(); EVKIN.go('semifinal'); };
+    // Pagination is view-only. Saving here used to resend tens of thousands
+    // of rows and could keep the database busy when Verify was clicked.
+    if (btnPrev) btnPrev.onclick = () => { S.semifinalPage = Math.max(0, S.semifinalPage - 1); EVKIN.go('semifinal'); };
+    if (btnNext) btnNext.onclick = () => { S.semifinalPage = Math.min(totalPages - 1, S.semifinalPage + 1); EVKIN.go('semifinal'); };
 
     if (window.lucide) lucide.createIcons();
 

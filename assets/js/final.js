@@ -266,7 +266,8 @@
     }
     if (!S.final.length) mod.process();
     el.innerHTML = `
-      <div class="module-head"><div><h2>⑥ Final</h2><p class="muted">Rekap bulanan per SDM — <span id="finalMonthLabel"></span>. Kehadiran = 30%, Kinerja/SKP = 70%.</p></div></div>
+      <div class="module-head"><div><h2>⑥ Final Workflow Absensi</h2><p class="muted">Rekap workflow/preview legacy per SDM — <span id="finalMonthLabel"></span>. Bukan Final TUKIN canonical dan bukan dasar pembayaran.</p></div></div>
+      <div class="alert warning"><i data-lucide="history"></i><span><strong>LEGACY / HISTORY.</strong> Gunakan Pengelolaan TUKIN untuk Calculation Snapshot dan menu Final TUKIN Canonical untuk approval/payment.</span></div>
       <div class="config-tabs">
         <button class="ctab ${tab === 'absensi' ? 'active' : ''}" data-t="absensi">Final Absensi</button>
         <button class="ctab ${tab === 'skp' ? 'active' : ''}" data-t="skp">Final + SKP (opsional)</button>
@@ -277,8 +278,9 @@
       <div id="finalBody">${tab === 'absensi' ? absensiView() : tab === 'skp' ? skpView() : tab === 'kombinasi' ? kombinasiView() : combinedView()}</div>
       <div class="actions-row">
         <button class="btn btn-ghost" onclick="EVKIN.go('semifinal')"><i data-lucide="arrow-left"></i> Kembali</button>
-        <button class="btn btn-success" id="saveFinalResult"><i data-lucide="database-zap"></i> Simpan Hasil Final</button>
+        <button class="btn btn-success" id="saveFinalResult"><i data-lucide="database-zap"></i> Simpan ke Histori Legacy</button>
         <button class="btn btn-primary" id="exportPairedFinal">Lanjut: Export Excel <i data-lucide="arrow-right"></i></button>
+        <button class="btn btn-primary" id="continueToSkp">Lanjut ke Penilaian SKP <i data-lucide="arrow-right"></i></button>
       </div><div id="finalExportStatus" role="status" aria-live="polite"></div>`;
     el.querySelectorAll('.ctab').forEach(b => b.onclick = () => { tab = b.dataset.t; EVKIN.go('final'); });
     el.querySelector('#finalMonthLabel').textContent = U.monthLabel(S.month);
@@ -295,6 +297,13 @@
     finalNipSearch.value = nipSearch;
     finalNipSearch.oninput = (e) => { nipSearch = e.target.value.trim().toLowerCase(); S.finalPage = 0; EVKIN.go('final'); };
     const exportButton = el.querySelector('#exportPairedFinal');
+    el.querySelector('#continueToSkp').onclick = async () => {
+      try {
+        if (EVKIN.exportBackend?.enabled) await EVKIN.syncBackendWorkflow(undefined, { finalOnly: true });
+        if (EVKIN.skpAssessmentMod?.selectTab) EVKIN.skpAssessmentMod.selectTab('overview');
+        EVKIN.go('skp-assessment');
+      } catch (error) { EVKIN.toast(error.message || String(error), 'error'); }
+    };
     exportButton.onclick = async () => {
       if (exportButton.disabled) return;
       const status = el.querySelector('#finalExportStatus');
@@ -325,7 +334,7 @@
       if (!S.final.length) return EVKIN.toast('Final Workflow belum berisi data.', 'error');
       if (finalNeedsMaster()) return EVKIN.toast('Lengkapi Master SDM untuk NIP yang belum memiliki Tukin bruto sebelum menyimpan.', 'error');
       if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) return EVKIN.toast('Backend wajib aktif untuk menyimpan hasil final.', 'error');
-      if (!confirm('Simpan hasil Final Workflow ke database Tukin?')) return;
+      if (!confirm('Simpan hasil workflow ke HISTORI LEGACY? Data ini bukan Final TUKIN canonical dan bukan dasar pembayaran.')) return;
       saveFinalResult.disabled = true;
       try {
         await EVKIN.syncBackendWorkflow(undefined, { finalOnly: true });

@@ -13,7 +13,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Mapping, Optional
 
 import duckdb
-import pandas as pd
+from backend.lazy_imports import lazy_module
+
+pd = lazy_module("pandas")
 from fastapi import APIRouter, HTTPException, Query
 
 

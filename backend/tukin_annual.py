@@ -21,9 +21,15 @@ from backend.workflow_readiness import WorkflowNotReadyError, validate_final_rea
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 import duckdb
-import pandas as pd
+from backend.lazy_imports import lazy_module
+
+pd = lazy_module("pandas")
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from backend.skp_assessment import (
+    VALID_PREDICATES as CANONICAL_SKP_RATES,
+    classify_skp_report_status,
+)
 
 ensure_tukin_annual_schema = importlib.import_module(
     "backend.migrations.034_create_tukin_annual_management"
@@ -37,6 +43,9 @@ ensure_condition_schema = importlib.import_module(
 ensure_third_missing_unpaid = importlib.import_module(
     "backend.migrations.041_enforce_third_missing_skp_unpaid"
 ).ensure_third_missing_skp_unpaid
+ensure_operational_schema = importlib.import_module(
+    "backend.migrations.049_create_skp_operational_workflow"
+).ensure_skp_operational_schema
 
 
 MONTH_NAMES = {
@@ -45,15 +54,11 @@ MONTH_NAMES = {
     9: "September", 10: "Oktober", 11: "November", 12: "Desember",
 }
 MONTH_LOOKUP = {name.lower(): number for number, name in MONTH_NAMES.items()}
-PREDICATE_RATES = {
-    "SANGAT BAIK": 0.0,
-    "BAIK": 0.0,
-    "BUTUH PERBAIKAN": 5.0,
-    "KURANG": 10.0,
-    "SANGAT KURANG": 15.0,
-}
+PREDICATE_RATES = dict(CANONICAL_SKP_RATES)
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_READY: set[str] = set()
+_ANNUAL_READ_LOCK = threading.RLock()
+_ANNUAL_READ_BASE: dict[str, duckdb.DuckDBPyConnection] = {}
 
 
 def _clean_header(value: Any) -> str:
@@ -184,24 +189,14 @@ def _predicate(value: Any) -> str:
 
 
 def _report_status(predicate: str, raw_status: Any) -> tuple[str, Optional[str]]:
-    status = _text(raw_status).upper()
-    combined = f"{predicate} {status}"
-    if "MELAHIRKAN" in combined:
-        return "EXEMPT_MATERNITY", "CUTI_MELAHIRKAN"
-    if any(term in combined for term in (
-        "TIDAK MENGERJAKAN", "TIDAK MEMBUAT", "TIDAK BISA DINILAI",
-        "TIDAK DAPAT DINILAI", "TIDAK ADA LAPORAN",
-    )):
-        return "NOT_SUBMITTED_VERIFIED", None
-    if predicate in PREDICATE_RATES:
-        return "SUBMITTED", None
-    if predicate == "-" or status == "-":
-        return "NOT_SUBMITTED_VERIFIED", None
-    if predicate == "":
-        return "DATA_MISSING", None
-    if any(term in combined for term in ("CUTI", "TUGAS BELAJAR", "MENINGGAL")):
-        return "EXEMPT_OTHER", predicate or status
-    return "INVALID_PREDICATE", None
+    status = classify_skp_report_status(predicate, raw_status)
+    combined = f"{_predicate(predicate)} {_predicate(raw_status)}"
+    exception = (
+        "CUTI_MELAHIRKAN" if status == "EXEMPT_MATERNITY"
+        else (_predicate(predicate) or _predicate(raw_status)) if status == "EXEMPT_OTHER"
+        else None
+    )
+    return status, exception
 
 
 def _payment_status(value: Any) -> str:
@@ -238,8 +233,19 @@ class TukinAnnualService:
                 ensure_deceased_schema(conn)
                 ensure_condition_schema(conn)
                 ensure_third_missing_unpaid(conn)
+                ensure_operational_schema(conn)
                 _SCHEMA_READY.add(self.db_path)
         return conn
+
+    def read_cursor(self):
+        """Reuse the catalog-loaded connection for dashboard list requests."""
+        path = str(Path(self.db_path).resolve())
+        with _ANNUAL_READ_LOCK:
+            base = _ANNUAL_READ_BASE.get(path)
+            if base is None:
+                base = self.connect()
+                _ANNUAL_READ_BASE[path] = base
+            return base.cursor()
 
     def _master_snapshots(self, assessment_period: str) -> dict[str, dict[str, Any]]:
         """Resolve the effective Master SDM values that must be frozen in a final period."""
@@ -533,13 +539,21 @@ class TukinAnnualService:
         # Include prior December so a streak can cross the year boundary.
         with self.connect() as conn:
             try:
-                rule = conn.execute(
-                    "SELECT third_month_action,third_month_rate FROM skp_rule_config WHERE id='DEFAULT'"
-                ).fetchone()
+                configured_rules = conn.execute(
+                    """SELECT streak_from,streak_to,action,reduction_rate,effective_from,effective_to
+                       FROM skp_non_submission_rule WHERE active=true
+                       ORDER BY streak_from DESC"""
+                ).fetchall()
             except duckdb.CatalogException:
-                rule = None
-            third_month_action = str(rule[0]) if rule else "UNPAID"
-            third_month_rate = float(rule[1] or 100) if rule else 100.0
+                configured_rules = []
+
+            def missing_rule(period, streak):
+                for start, end, action, rate, effective_from, effective_to in configured_rules:
+                    if int(start) <= streak and (end is None or streak <= int(end)) \
+                            and str(effective_from) <= period \
+                            and (not effective_to or period <= str(effective_to)):
+                        return float(rate), str(action) != 'UNPAID'
+                return (35.0, True) if streak == 1 else (70.0, True) if streak == 2 else (100.0, False)
             df = conn.execute(
                 """SELECT assessment_period,nip,report_status,predicate_normalized
                    FROM tukin_skp_monthly
@@ -558,8 +572,7 @@ class TukinAnnualService:
                     consecutive = previous_period is None or self._next_month(previous_period) == current
                     if row.report_status == "NOT_SUBMITTED_VERIFIED":
                         streak = streak + 1 if consecutive else 1
-                        rate = 35.0 if streak == 1 else 70.0 if streak == 2 else third_month_rate
-                        eligible = streak < 3
+                        rate, eligible = missing_rule(current, streak)
                     elif row.report_status in {"DATA_MISSING", "INVALID_PREDICATE", "REVIEW_REQUIRED"}:
                         streak = 0
                         rate = 0.0
@@ -593,8 +606,8 @@ class TukinAnnualService:
                    total_deduction=f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment,
                    calculated_entitlement=greatest(0,f.tukin_gross-(f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment)),
                    paid_amount=CASE WHEN s.payment_eligible THEN greatest(0,f.tukin_gross-(f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment)) ELSE 0 END,
-                    payment_status=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_status IN ('HOLD','UNPAID') AND f.payment_reason LIKE '%SKP%' THEN 'READY_TO_PAY' ELSE f.payment_status END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' AND s.consecutive_missing>=3 THEN 'UNPAID' ELSE 'HOLD' END END,
-                    payment_reason=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_reason LIKE '%SKP%' THEN '' ELSE f.payment_reason END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' AND s.consecutive_missing>=3 THEN 'Tidak membuat laporan SKP 3 bulan berturut-turut atau lebih - Tukin tidak dibayarkan' WHEN s.report_status IN ('DATA_MISSING','INVALID_PREDICATE','REVIEW_REQUIRED') THEN 'Penilaian SKP belum valid/disetujui' ELSE 'Penilaian SKP tidak memenuhi syarat pembayaran' END END,
+                    payment_status=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_status IN ('HOLD','UNPAID') AND f.payment_reason LIKE '%SKP%' THEN 'READY_TO_PAY' ELSE f.payment_status END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' THEN 'UNPAID' ELSE 'HOLD' END END,
+                    payment_reason=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_reason LIKE '%SKP%' THEN '' ELSE f.payment_reason END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' THEN 'Tidak mengerjakan SKP 3 bulan berturut-turut atau lebih (default); keputusan mengikuti konfigurasi periode' WHEN s.report_status IN ('DATA_MISSING','INVALID_PREDICATE','REVIEW_REQUIRED') THEN 'Penilaian SKP belum valid/disetujui' ELSE 'Penilaian SKP tidak memenuhi syarat pembayaran' END END,
                    updated_at=now()
                    FROM tukin_skp_monthly AS s JOIN tukin_period AS p
                      ON p.assessment_period=s.assessment_period
@@ -613,8 +626,8 @@ class TukinAnnualService:
                    total_deduction=f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment,
                    calculated_entitlement=greatest(0,f.tukin_gross-(f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment)),
                    paid_amount=CASE WHEN s.payment_eligible THEN greatest(0,f.tukin_gross-(f.attendance_deduction+round(f.tukin_gross*.70*s.skp_reduction_rate/100)-f.manual_adjustment)) ELSE 0 END,
-                   payment_status=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_status IN ('HOLD','UNPAID') AND f.payment_reason LIKE '%SKP%' THEN 'READY_TO_PAY' ELSE f.payment_status END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' AND s.consecutive_missing>=3 THEN 'UNPAID' ELSE 'HOLD' END END,
-                   payment_reason=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_reason LIKE '%SKP%' THEN '' ELSE f.payment_reason END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' AND s.consecutive_missing>=3 THEN 'Tidak membuat laporan SKP 3 bulan berturut-turut atau lebih - Tukin tidak dibayarkan' WHEN s.report_status IN ('DATA_MISSING','INVALID_PREDICATE','REVIEW_REQUIRED') THEN 'Penilaian SKP belum valid/disetujui' ELSE 'Penilaian SKP tidak memenuhi syarat pembayaran' END END,
+                   payment_status=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_status IN ('HOLD','UNPAID') AND f.payment_reason LIKE '%SKP%' THEN 'READY_TO_PAY' ELSE f.payment_status END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' THEN 'UNPAID' ELSE 'HOLD' END END,
+                   payment_reason=CASE WHEN s.payment_eligible THEN CASE WHEN f.payment_reason LIKE '%SKP%' THEN '' ELSE f.payment_reason END ELSE CASE WHEN s.report_status='NOT_SUBMITTED_VERIFIED' THEN 'Tidak mengerjakan SKP 3 bulan berturut-turut atau lebih (default); keputusan mengikuti konfigurasi periode' WHEN s.report_status IN ('DATA_MISSING','INVALID_PREDICATE','REVIEW_REQUIRED') THEN 'Penilaian SKP belum valid/disetujui' ELSE 'Penilaian SKP tidak memenuhi syarat pembayaran' END END,
                    updated_at=now()
                    FROM tukin_skp_monthly AS s
                    WHERE f.assessment_period=s.assessment_period AND f.nip=s.nip AND f.assessment_period=?""",
@@ -718,6 +731,9 @@ class TukinAnnualService:
         self.ensure_period(assessment, payment, "LIVE")
         year, month_number = map(int, assessment.split("-"))
         with self.connect() as conn:
+            from backend.absence_cutover import assert_canonical_absence_ready
+            assert_canonical_absence_ready(conn, assessment)
+
             def table_df(name: str) -> pd.DataFrame:
                 try:
                     cols = {r[1] for r in conn.execute(f"PRAGMA table_info('{name}')").fetchall()}
@@ -946,6 +962,11 @@ class TukinAnnualService:
         evidence = _text(payload.get("evidence_ref"))
         approved_by = _text(payload.get("approved_by"))
         with self.connect() as conn:
+            period_state = conn.execute(
+                "SELECT status FROM tukin_period WHERE assessment_period=?", [assessment]
+            ).fetchone()
+            if period_state and _text(period_state[0]).upper() in {"LOCKED", "PAID", "HISTORICAL_LOCKED"}:
+                raise ValueError("Periode terkunci atau sudah dibayar; kondisi tidak dapat diubah")
             exists = conn.execute(
                 "SELECT 1 FROM tukin_final_monthly WHERE assessment_period=? AND nip=?",
                 [assessment, nip],
@@ -1187,14 +1208,67 @@ class TukinAnnualService:
 
     def annual(self, year: int, q: str = "", page: int = 1, per_page: int = 50) -> dict[str, Any]:
         start, end = f"{year}-01", f"{year}-12"
-        with self.connect() as conn:
-            final = conn.execute(
-                "SELECT * FROM tukin_final_monthly WHERE assessment_period BETWEEN ? AND ?", [start, end]
+        needle = f"%{q.strip().lower()}%"
+        with self.read_cursor() as conn:
+            people_sql = """
+                WITH source_people AS (
+                    SELECT nip,nama,jabatan,province,bank_name,account_number
+                    FROM tukin_final_monthly WHERE assessment_period BETWEEN ? AND ?
+                    UNION ALL
+                    SELECT nip,nama,jabatan,'' province,'' bank_name,'' account_number
+                    FROM tukin_skp_monthly WHERE assessment_period BETWEEN ? AND ?
+                ), people AS (
+                    SELECT nip,max(coalesce(nama,'')) nama,max(coalesce(jabatan,'')) jabatan,
+                           max(coalesce(province,'')) province,max(coalesce(bank_name,'')) bank_name,
+                           max(coalesce(account_number,'')) account_number
+                    FROM source_people GROUP BY nip
+                )
+            """
+            filter_sql = " WHERE lower(coalesce(nip,'')) LIKE ? OR lower(coalesce(nama,'')) LIKE ?" if q.strip() else ""
+            base_params = [start, end, start, end]
+            filter_params = [needle, needle] if q.strip() else []
+            total = int(conn.execute(
+                people_sql + "SELECT count(*) FROM people" + filter_sql,
+                base_params + filter_params,
+            ).fetchone()[0])
+            page_people = conn.execute(
+                people_sql + "SELECT * FROM people" + filter_sql +
+                " ORDER BY lower(nama),nip LIMIT ? OFFSET ?",
+                base_params + filter_params + [per_page, (page - 1) * per_page],
             ).fetchdf()
-            skp = conn.execute(
-                "SELECT * FROM tukin_skp_monthly WHERE assessment_period BETWEEN ? AND ?", [start, end]
-            ).fetchdf()
+            aggregate_select = """SELECT coalesce(sum(tukin_gross),0),coalesce(sum(skp_deduction),0),
+                          coalesce(sum(attendance_deduction),0),coalesce(sum(paid_amount),0),
+                          count(*) FILTER (WHERE payment_status='UNPAID')
+                   FROM tukin_final_monthly f {join_sql}
+                   WHERE f.assessment_period BETWEEN ? AND ?"""
+            if q.strip():
+                aggregate_row = conn.execute(
+                    people_sql + ", matched AS (SELECT nip FROM people" + filter_sql + ") " +
+                    aggregate_select.format(join_sql="JOIN matched m ON m.nip=f.nip"),
+                    base_params + filter_params + [start, end],
+                ).fetchone()
+            else:
+                aggregate_row = conn.execute(
+                    aggregate_select.format(join_sql=""), [start, end]
+                ).fetchone()
+            page_nips = page_people['nip'].astype(str).tolist() if not page_people.empty else []
+            if page_nips:
+                placeholders = ','.join('?' for _ in page_nips)
+                final = conn.execute(
+                    f"SELECT * FROM tukin_final_monthly WHERE assessment_period BETWEEN ? AND ? "
+                    f"AND nip IN ({placeholders})", [start, end, *page_nips]
+                ).fetchdf()
+                skp = conn.execute(
+                    f"SELECT * FROM tukin_skp_monthly WHERE assessment_period BETWEEN ? AND ? "
+                    f"AND nip IN ({placeholders})", [start, end, *page_nips]
+                ).fetchdf()
+            else:
+                final = conn.execute("SELECT * FROM tukin_final_monthly LIMIT 0").fetchdf()
+                skp = conn.execute("SELECT * FROM tukin_skp_monthly LIMIT 0").fetchdf()
         people: dict[str, dict[str, Any]] = {}
+        for identity in page_people.to_dict("records"):
+            nip = _text(identity.get("nip")); person = people.setdefault(nip, self._person_base(nip))
+            self._fill_identity(person, identity)
         for row in final.to_dict("records"):
             nip = _text(row.get("nip")); person = people.setdefault(nip, self._person_base(nip))
             self._fill_identity(person, row)
@@ -1211,25 +1285,20 @@ class TukinAnnualService:
                 "payment_eligible": bool(row.get("payment_eligible", True)),
             })
         values = list(people.values())
-        if q:
-            needle = q.lower()
-            values = [p for p in values if needle in p["nip"].lower() or needle in p["nama"].lower()]
         for person in values:
             self._summarize_person(person)
         values.sort(key=lambda p: (p["nama"].lower(), p["nip"]))
-        total = len(values); start_at = (page-1)*per_page
-        page_rows = values[start_at:start_at+per_page]
         aggregate = {
             "people": total,
-            "gross": sum(p["summary"]["gross"] for p in values),
-            "skp_deduction": sum(p["summary"]["skp_deduction"] for p in values),
-            "attendance_deduction": sum(p["summary"]["attendance_deduction"] for p in values),
-            "paid": sum(p["summary"]["paid"] for p in values),
-            "unpaid_months": sum(p["summary"]["unpaid_months"] for p in values),
+            "gross": float(aggregate_row[0] or 0),
+            "skp_deduction": float(aggregate_row[1] or 0),
+            "attendance_deduction": float(aggregate_row[2] or 0),
+            "paid": float(aggregate_row[3] or 0),
+            "unpaid_months": int(aggregate_row[4] or 0),
         }
         return {"status": "ok", "year": year, "page": page, "per_page": per_page,
                 "total": total, "pages": max(1, math.ceil(total/per_page)),
-                "aggregate": aggregate, "rows": page_rows}
+                "aggregate": aggregate, "rows": values}
 
     @staticmethod
     def _person_base(nip: str) -> dict[str, Any]:
@@ -1335,6 +1404,19 @@ class TukinAnnualService:
             exists = conn.execute("SELECT status FROM tukin_period WHERE assessment_period=?", [assessment]).fetchone()
             if not exists: raise KeyError("Periode tidak ditemukan")
             old_status = str(exists[0] or "DRAFT")
+            canonical = None
+            has_canonical = conn.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name='tukin_final_decision'"
+            ).fetchone()[0]
+            if has_canonical:
+                canonical = conn.execute(
+                    """SELECT status FROM tukin_final_decision WHERE assessment_period=?
+                       ORDER BY created_at DESC LIMIT 1""", [assessment]
+                ).fetchone()
+            if canonical and canonical[0] == "PAID" and status != "PAID":
+                raise ValueError("Final Decision canonical sudah PAID dan tidak dapat diturunkan")
+            if canonical and status == "PAID":
+                raise ValueError("Gunakan payment action pada Final Decision canonical, bukan status periode legacy")
             allowed = {
                 "DRAFT": {"DRAFT", "REVIEW"},
                 "REVIEW": {"DRAFT", "REVIEW", "APPROVED"},
@@ -1348,7 +1430,7 @@ class TukinAnnualService:
             if not legacy_call and status in {"APPROVED", "LOCKED", "PAID"}:
                 incomplete = conn.execute(
                     """SELECT count(*) FROM tukin_final_monthly
-                       WHERE assessment_period=? AND (payment_status IN ('HOLD','UNPAID')
+                       WHERE assessment_period=? AND (payment_status='HOLD'
                          OR calculated_entitlement IS NULL)""", [assessment]
                 ).fetchone()[0]
                 if incomplete and status in {"LOCKED", "PAID"}:
@@ -1385,7 +1467,7 @@ class TukinAnnualService:
                            (id,assessment_period,nip,status,amount,reason_code,created_by)
                            VALUES (?,?,?,?,?,?,?)""",
                         [(str(uuid.uuid4()), assessment, str(nip), "PAID", float(amount or 0),
-                          "PERIOD_MARKED_PAID", "EVKIN") for nip, amount in payable],
+                          "PERIOD_MARKED_PAID", actor) for nip, amount in payable],
                     )
         return {"status": "ok", "assessment_period": assessment, "period_status": status}
 
@@ -1478,6 +1560,19 @@ class TukinAnnualService:
     def export_final(self, assessment: str) -> io.BytesIO:
         assessment = _period(assessment)
         with self.connect() as conn:
+            has_canonical = conn.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name='tukin_final_decision'"
+            ).fetchone()[0]
+            decision = conn.execute(
+                """SELECT id FROM tukin_final_decision WHERE assessment_period=?
+                   ORDER BY created_at DESC LIMIT 1""", [assessment]
+            ).fetchone() if has_canonical else None
+        if decision:
+            # Compatibility wrapper: new Final exports always use the locked canonical snapshot.
+            from backend.final_tukin import FinalTukinService
+            return FinalTukinService(self.db_path).export_final_decision(decision[0])
+        with self.connect() as conn:
+            # Historical read compatibility only; no new canonical Final Decision is created here.
             df = conn.execute("SELECT * FROM tukin_final_monthly WHERE assessment_period=? ORDER BY nama,nip", [assessment]).fetchdf()
         if df.empty: raise KeyError("Data final periode belum tersedia")
         rename = {"penilai":"Penilai","nip":"NIP","kd_anak_satker":"KD ANAK SATKER","nama":"Nama","jabatan":"Jabatan",

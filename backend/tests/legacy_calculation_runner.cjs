@@ -19,7 +19,7 @@ async function main() {
       createElement() { return {classList: {add() {}, remove() {}}, appendChild() {}, remove() {}}; }
     }
   };
-  for (const name of ['utils', 'data', 'state', 'calc', 'config', 'rekap']) {
+  for (const name of ['utils', 'data', 'state', 'calc', 'config', 'rekap', 'import']) {
     load(`assets/js/${name}.js`, sandbox);
   }
   E.ensureWorkflowDataForComputation = async () => {};
@@ -48,7 +48,7 @@ async function main() {
   const output = [];
   for (const item of fixture.cases) {
     const config = E.normalizeConfig(JSON.parse(JSON.stringify(fixture.config)));
-    config.masterPegawai = [{nip: item.nip, nama: item.id, jabatan: item.job, tukin: item.gross}];
+    config.masterPegawai = item.master_missing ? [] : [{nip: item.nip, nama: item.id, jabatan: item.master_job || item.job, tukin: item.gross}];
     E.state.config = config;
     E.state.month = item.date.slice(0, 7);
     E.state.timeMode = item.time_mode || 'original';
@@ -68,7 +68,7 @@ async function main() {
       masukNormMinAdd: wrap(masuk, offsetAdd), pulangNormMinAdd: wrap(pulang, offsetAdd),
       zona: zone, provinsi: '', kabupaten: '', jenis: item.kind || '',
       crossDay: !!item.cross_day, sourceFormat: item.source_format || 'standard',
-      shiftFlag: item.cross_day ? 'SHIFT LINTAS HARI' : '', issues: [], dupFlag: !!item.duplicate
+      shiftFlag: item.cross_day ? 'SHIFT LINTAS HARI' : '', issues: item.issues || [], dupFlag: !!item.duplicate
     };
     const records = item.duplicate ? [base, {...base, _id: item.id + '-duplicate'}] : [base];
     const daily = records.map(record => E.calc.computeRecord(record, E.calc.buildContext(), E.state.timeMode));
@@ -105,14 +105,31 @@ async function main() {
       finalCombined = synced.final_combined_skp[0];
     }
     output.push({
-      id: item.id, nip: item.nip, daily, rekap, rekap_error: rekapError,
+      id: item.id, nip: item.nip,
+      normalized_input: {
+        date: date && date.key,
+        check_in_minutes: masuk,
+        check_out_minutes: pulang,
+        check_in_effective: E.calc.timesForMode(base, E.state.timeMode).masuk,
+        check_out_effective: E.calc.timesForMode(base, E.state.timeMode).pulang,
+        zone, time_mode: E.state.timeMode, cross_day: !!item.cross_day
+      },
+      daily, rekap, rekap_error: rekapError,
       final_input: {gross: item.gross, attendance_rate: attendanceRate,
         skp_rate: item.skp_rate == null ? null : item.skp_rate,
         skp_status: item.skp_status || null},
       final_absensi: finalAbsensi, final_skp: finalSkp, final_combined: finalCombined
     });
   }
-  process.stdout.write(JSON.stringify({contract_version: fixture.contract_version, cases: output}));
+  const normalizationCases = (fixture.normalization_cases || []).map(item => {
+    const headers = ['NIP', 'Nama', 'Jabatan', 'Tanggal', 'Tanggal Pulang', 'Jam Masuk', 'Jam Pulang', 'Zona', 'Provinsi', 'Jenis'];
+    const row = [item.nip, item.name, item.job, item.date, item.out_date, item.in, item.out, item.zone, item.province, item.kind];
+    const result = E.importMod.processSingleRow(row, headers, E.importMod.detectColumns(headers), {partial: !!item.partial});
+    const data = result.dataObj ? {...result.dataObj} : null;
+    if (data) delete data._id;
+    return {id: item.id, invalid: result.invalid, raw: result.rawObj, normalized: data};
+  });
+  process.stdout.write(JSON.stringify({contract_version: fixture.contract_version, cases: output, normalization_cases: normalizationCases}));
 }
 
 main().catch(error => { console.error(error); process.exitCode = 1; });

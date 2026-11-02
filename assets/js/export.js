@@ -484,6 +484,11 @@
     }
 
     if (hasDatabaseModule) {
+      if (EVKIN.db.isCacheStale && EVKIN.db.isCacheStale()) {
+        EVKIN.toast('Cache browser berasal dari sebelum Reset Data Operasional dan belum berhasil dibersihkan. Offline export dinonaktifkan sampai cache dibersihkan.', 'warning');
+        updateProgressUI(100, 'Cache browser lama harus dibersihkan sebelum export offline.');
+        return;
+      }
       const filename = 'EVKIN_ABSENSI_DB_' + (S.month || 'export') + (smartMode ? '_smart' : '') + '.xlsx';
       EVKIN.toast('Export dari database hasil hitung harian + rekap + final...', 'info');
       updateProgressUI(10, 'Membaca data dari IndexedDB...');
@@ -842,10 +847,10 @@
   };
 
   mod.render = function (el) {
-    if (!EVKIN.stepUnlocked('export')) { el.innerHTML = `<div class="module-head"><h2>Export Excel <span class="pill gray">🔒 Terkunci</span></h2></div><div class="alert warn">Selesaikan Final terlebih dahulu.</div>`; return; }
+    if (!EVKIN.stepUnlocked('export')) { el.innerHTML = `<div class="module-head"><h2>Export Rekap Absensi <span class="pill gray">🔒 Terkunci</span></h2></div><div class="alert warn">Selesaikan Rekap SDM terlebih dahulu.</div>`; return; }
     const sheets = mod.getAvailableSheets();
     el.innerHTML = `
-      <div class="module-head"><div><h2>⑦ Export Excel</h2><p class="muted">Pilih sheet yang akan dibuat menjadi satu workbook Excel. Data utama diambil dari backend DuckDB master.</p></div></div>
+      <div class="module-head"><div><h2>⑥ Export Rekap Absensi</h2><p class="muted">Pilih sheet yang akan dibuat menjadi satu workbook Excel. Data utama diambil dari backend DuckDB master.</p></div></div>
 
       <div class="card" style="background:linear-gradient(135deg, #f7fafc 0%, #eef4fb 100%); border:1px solid #d1e3f7;">
         <h3 style="color:#1a365d;">Sumber Data Export</h3>
@@ -890,9 +895,18 @@
         let expectedFinal;
 
         if (backendReady) {
+          const authority = await EVKIN.exportBackend.getAbsenceAuthority();
+          const pythonCanonical = authority.authority === 'PYTHON_CANONICAL';
+          if (pythonCanonical) {
+            const latest = await EVKIN.exportBackend.getLatestAbsenceCalculation(S.month || '');
+            if (latest.status !== 'COMPLETED' || !latest.canonical) {
+              throw new Error('Final Absensi canonical backend belum siap untuk export.');
+            }
+            await EVKIN.exportBackend.hydrateCanonicalAbsence(S.month || '', latest.calculation_id);
+          }
           // The user may enter Export from the sidebar, or change Final after
           // an earlier export. Persist just the current Final results first.
-          if (chosen.some(name => name.startsWith('FINAL')) && S.final.length) {
+          if (!pythonCanonical && chosen.some(name => name.startsWith('FINAL')) && S.final.length) {
             if (S.final.some(row => row.tukin == null || row.tukin === '')) {
               EVKIN.toast('Final masih memiliki NIP tanpa Tukin bruto. Lengkapi Master SDM sebelum ekspor.', 'error');
               return;
@@ -935,6 +949,10 @@
             EVKIN.toast('Export gagal. File yang belum lolos validasi tidak diunduh.', 'error');
             return;
           }
+        }
+
+        if (EVKIN.exportBackend && EVKIN.exportBackend.calculationAuthority === 'PYTHON_CANONICAL') {
+          throw new Error('Export canonical memerlukan backend; fallback browser/IndexedDB dinonaktifkan.');
         }
 
         updateProgressUI(10, 'Membaca data dari browser untuk fallback export...');

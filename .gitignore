@@ -16,14 +16,12 @@
 # EVKIN runtime data, backups, exports, and generated output
 /backend/data/
 /backend/exports/
+/backend/reports/
 /outputs/
 /output/
 /exports/
 /export/
 
-# Known data-bearing workbooks (not templates)
-/examples/master_pengembalian/FORMAT_IMPORT_BNBA_TERPADU.xlsx
-/examples/master_pengembalian/FORMAT_IMPORT_BNBA_TERPADU_BERSIH.xlsx
 
 # Logs and diagnostics generated at runtime
 *.log

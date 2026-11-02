@@ -6,6 +6,12 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from backend import evkin_export_api as api
+from backend.runtime_guard import (
+    begin_runtime_reset,
+    current_reset_generation,
+    finish_runtime_reset,
+    initialize_runtime_state,
+)
 
 
 @pytest.fixture
@@ -18,6 +24,7 @@ def workflow_db(tmp_path, monkeypatch):
         api._workflow_read_base = None
         api._workflow_read_path = None
     api.ensure_duckdb_master_schema()
+    initialize_runtime_state(path)
     yield path
     if api._workflow_read_base is not None:
         api._workflow_read_base.close()
@@ -65,6 +72,7 @@ def persist_import(rows, workflow_id="WORKFLOW-A", expected=None):
 def test_ten_rows_are_complete_without_workflow_record_duplication(workflow_db):
     persist_import(raw_rows(10))
     state = api.get_workflow_state()
+    assert state["reset_generation"] == current_reset_generation()
     assert state["meta"]["workflow_id"] == "WORKFLOW-A"
     assert state["meta"]["total_row_counts"]["raw_import"] == 10
     result = api.get_workflow_calculation_input("WORKFLOW-A", 1, 500)
@@ -171,7 +179,8 @@ def test_calculation_input_rejects_other_workflow_and_incomplete_import(workflow
 def test_chunk_schema_error_returns_safe_stage_message(workflow_db, monkeypatch):
     monkeypatch.setenv("EVKIN_API_KEY", "test-key")
     client = TestClient(api.app, raise_server_exceptions=False)
-    headers = {"X-EVKIN-API-Key": "test-key"}
+    headers = {"X-EVKIN-API-Key": "test-key",
+               "X-EVKIN-Generation": str(current_reset_generation())}
     first = client.post("/api/workflow/sync-table", headers=headers, json={
         "source": "raw_import", "replace": True, "workflow_id": "default",
         "rows": [{"NIP": "1", "Tanggal": "01/08/2026", "Opsional": "X"}],
@@ -187,3 +196,85 @@ def test_chunk_schema_error_returns_safe_stage_message(workflow_db, monkeypatch)
         "message": "Penyimpanan impor gagal karena struktur antar-batch tidak konsisten.",
         "stage": "IMPORT_PERSISTENCE",
     }
+
+
+def test_harian_worker_rejects_generation_captured_before_reset(workflow_db, monkeypatch):
+    old_generation = current_reset_generation()
+    compute_calls = []
+    job_updates = []
+    monkeypatch.setattr(api, "compute_harian_duckdb", lambda *args: compute_calls.append(args) or 1)
+    monkeypatch.setattr(api, "_update_job", lambda job_id, **fields: job_updates.append(fields))
+
+    begin_runtime_reset(workflow_db)
+    finish_runtime_reset(workflow_db)
+    api.run_compute_harian_job("stale-job", "2026-08", "original", None, old_generation)
+
+    assert compute_calls == []
+    assert job_updates[-1]["status"] == "stale_after_reset"
+    assert "STALE_AFTER_RESET" in job_updates[-1]["message"]
+
+
+def test_harian_worker_accepts_current_generation(workflow_db, monkeypatch):
+    compute_calls = []
+    job_updates = []
+    monkeypatch.setattr(api, "compute_harian_duckdb", lambda *args: compute_calls.append(args) or 7)
+    monkeypatch.setattr(api, "_update_job", lambda job_id, **fields: job_updates.append(fields))
+
+    api.run_compute_harian_job(
+        "fresh-job", "2026-08", "original", None, current_reset_generation()
+    )
+
+    assert compute_calls == [("fresh-job", "2026-08", "original", None)]
+    assert job_updates[-1]["status"] == "finished"
+    assert job_updates[-1]["row_count"] == 7
+
+
+@pytest.mark.parametrize("time_mode", ["original", "wib", "wib-add"])
+def test_complete_next_day_attendance_has_zero_daily_penalties(workflow_db, monkeypatch, time_mode):
+    def job_connection():
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE jobs (id TEXT, status TEXT)")
+        return connection
+
+    monkeypatch.setattr(api, "get_connection", job_connection)
+    monkeypatch.setattr(api, "_update_job", lambda *args, **kwargs: None)
+    cases = [
+        ("NIGHT", "Guru", 1200, 240, "2026-08-04", 0),
+        ("SHORT_NIGHT", "Wali Asuh", 1380, 60, "2026-08-04", 0),
+        ("DATED_NEXT_DAY", "Guru", 480, 600, "2026-08-04", 0),
+        ("MISSING_OUT", "Guru", 1200, None, "2026-08-04", 3),
+        ("MISSING_IN", "Guru", None, 240, "2026-08-04", 3),
+        ("SAME_DAY_LATE", "Guru", 1200, 1320, "2026-08-03", 3),
+        ("SAME_DAY_SHORT", "Wali Asuh", 480, 600, "2026-08-03", 3),
+    ]
+    rows = []
+    for nip, job, check_in, check_out, out_date, _ in cases:
+        rows.append({
+            "nip": nip, "nama": nip, "jabatan": job, "tanggal": "2026-08-03",
+            "tanggal_pulang": out_date, "zona": "WIB", "jenis": "",
+            **{name: check_in for name in ["masukMin", "masukNormMin", "masukNormMinAdd"]},
+            **{name: check_out for name in ["pulangMin", "pulangNormMin", "pulangNormMinAdd"]},
+        })
+    api.sync_workflow({"config": {
+        "holidays": [{"d": "2026-08-17", "n": "Kemerdekaan"}],
+        "jabatanMaster": [{"nama": "Wali Asuh", "metode": "durasi"}],
+    }})
+    # The schema fixture uses a metadata-only empty placeholder. The worker
+    # creates its own result schema for this isolated calculation.
+    with duckdb.connect(workflow_db) as connection:
+        connection.execute("DROP TABLE hitung_harian")
+        # This legacy SQL worker consumes normalized numeric minute columns.
+        connection.register("night_input", api.pd.DataFrame(rows))
+        connection.execute("CREATE OR REPLACE TABLE raw_import AS SELECT * FROM night_input")
+    assert api.compute_harian_duckdb("night-test", "2026-08", time_mode, None, chunk_size=2) == len(cases)
+    with duckdb.connect(workflow_db) as connection:
+        result = {row[0]: row[1:] for row in connection.execute(
+            "SELECT nip,totalHarian,potKeterlambatan,potPulangCepat,potDurasi,potTidakLengkap "
+            "FROM hitung_harian"
+        ).fetchall()}
+    for nip, _, check_in, check_out, out_date, expected in cases:
+        assert result[nip][0] == expected
+        if out_date == "2026-08-04" and check_in is not None and check_out is not None:
+            assert result[nip] == (0, 0, 0, 0, 0)
+        if check_in is None or check_out is None:
+            assert result[nip][-1] == 3

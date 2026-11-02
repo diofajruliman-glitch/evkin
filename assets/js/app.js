@@ -10,7 +10,6 @@
     config: () => EVKIN.configMod,
     'master-sdm': () => EVKIN.masterSdmMod,
     'skp-assessment': () => EVKIN.skpAssessmentMod,
-  'master-pengembalian': () => EVKIN.masterPengembalianMod,
   'tukin-annual': () => EVKIN.tukinAnnualMod,
   reconcile: () => EVKIN.reconcileMod,
   harian: () => EVKIN.harianMod,
@@ -67,6 +66,17 @@
     return true;
   };
 
+  EVKIN.clearBrowserCache = async function (options = {}) {
+    if (!EVKIN.db || typeof EVKIN.db.resetDatabase !== 'function') {
+      return { ok: false, status: 'ERROR', error: 'Fitur cache browser tidak tersedia.' };
+    }
+    try {
+      return await EVKIN.db.resetDatabase(options);
+    } catch (error) {
+      return { ok: false, status: 'ERROR', error: String(error && error.message || error) };
+    }
+  };
+
   EVKIN.syncBackendWorkflow = async function (onProgress, options = {}) {
     if (EVKIN.deletingAbsensi) throw new Error('Penghapusan workflow absensi sedang berlangsung.');
     if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) return null;
@@ -118,12 +128,15 @@
       };
       const workflow = {
         config: {...Object.fromEntries(Object.entries(S.config || {}).filter(([key]) => key !== 'masterPegawai')),
-          _workflow: {month:S.month, timeMode:S.timeMode, importMode:S.importMode,
+          _workflow: {month:S.month, workflow_id:S.workflowMeta && S.workflowMeta.workflow_id || 'default',
+            importStatus:S.workflowMeta && S.workflowMeta.status === 'ACTIVE' ? 'COMPLETE' : 'INCOMPLETE',
+            timeMode:S.timeMode, importMode:S.importMode,
             importStats:S.importStats, semifinalVerified:S.semifinalVerified,
             finalSKP:S.finalSKP, finalKombinasi:S.finalKombinasi,
             finalCombinedSKP:S.finalCombinedSKP}},
         raw_import: S.raw || [],
-        processed_data: (S.data || []).map(record => ({record:JSON.stringify(record)})),
+        // raw_import is canonical. Never recreate the former per-row JSON copy.
+        processed_data: [],
         daily_data: S.daily || [],
         rekap_sdm: S.rekap || [],
         semifinal: S.semifinal || S.daily || [],
@@ -137,7 +150,14 @@
           if (!['final_absensi', 'final_skp', 'final_kombinasi', 'final_combined_skp'].includes(key)) delete workflow[key];
         }
       }
-      if (options.derivedOnly) delete workflow.raw_import;
+      if (options.derivedOnly) {
+        delete workflow.raw_import;
+        delete workflow.processed_data;
+      }
+      if (Array.isArray(options.sources)) {
+        const allowed = new Set(options.sources);
+        for (const key of Object.keys(workflow)) if (!allowed.has(key)) delete workflow[key];
+      }
       const result = await EVKIN.exportBackend.syncWorkflow(workflow, undefined, reportProgress);
       if (EVKIN.progress) EVKIN.progress({ title: 'Sinkronisasi data', percent: 100, message: 'Data berhasil disinkronkan.', state: 'done' });
       if (EVKIN.auditMod) EVKIN.auditMod.logDatabaseSync('SQLite Python', 'SUCCESS', result.counts);
@@ -147,6 +167,89 @@
       if (EVKIN.auditMod) EVKIN.auditMod.logDatabaseSync('SQLite Python', 'FAILED', { message: error.message });
       throw error;
     }
+  };
+
+  EVKIN.syncImportedWorkflow = async function (onProgress) {
+    if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) return null;
+    if (!EVKIN.exportBackend.syncTableChunks) {
+      return EVKIN.syncBackendWorkflow(onProgress, {
+        sources: ['config', 'raw_import', 'processed_data', 'daily_data', 'rekap_sdm',
+          'semifinal', 'final_absensi', 'final_skp', 'final_kombinasi', 'final_combined_skp']
+      });
+    }
+    const S = EVKIN.state;
+    const workflowId = S.workflowMeta && S.workflowMeta.workflow_id || 'default';
+    if (S.workflowMeta) S.workflowMeta.status = 'IMPORTING';
+    const scope = {workflow_id:workflowId, periode:S.month || null};
+    const config = {...Object.fromEntries(Object.entries(S.config || {}).filter(([key]) => key !== 'masterPegawai')),
+      _workflow: {month:S.month, workflow_id:workflowId, timeMode:S.timeMode, importMode:S.importMode,
+        importStatus:'COMPLETE', importStats:S.importStats, semifinalVerified:false,
+        finalSKP:S.finalSKP, finalKombinasi:S.finalKombinasi,
+        finalCombinedSKP:S.finalCombinedSKP}};
+    const clearedSources = ['daily_data', 'rekap_sdm', 'semifinal', 'final_absensi',
+      'final_skp', 'final_kombinasi', 'final_combined_skp'];
+    // Legacy Excel/Wali still owns parsing and pairing in the browser. Persist
+    // its already-normalized result through the canonical raw_import contract
+    // so it can coexist with Backend Import V1 without changing either engine.
+    const canonicalRawRows = (S.data || []).filter(row => row && !row.deleted).map((row, index) => ({
+      workflow_id: workflowId,
+      import_id: workflowId,
+      source_row: index + 1,
+      nip: String(row.nip || ''),
+      nama: String(row.nama || ''),
+      jabatan: String(row.jabatan || ''),
+      tanggal: String(row.tanggal && row.tanggal.key || row.tanggalKey || row.tanggal || ''),
+      tanggal_pulang: String(row.tanggalPulangObj && row.tanggalPulangObj.key || row.tanggalPulang || ''),
+      jam_masuk: String(row.masukRaw || (row.masukMin == null ? '' : EVKIN.util.fmtTime(row.masukMin))),
+      jam_pulang: String(row.pulangRaw || (row.pulangMin == null ? '' : EVKIN.util.fmtTime(row.pulangMin))),
+      zona: String(row.zona || ''),
+      provinsi: String(row.provinsi || ''),
+      kabupaten: String(row.kabupaten || ''),
+      jenis: String(row.jenis || ''),
+      source_format: S.importMode === 'wali' ? 'wali' : 'legacy_excel',
+      raw_json: JSON.stringify(row),
+      file_sha256: ''
+    }));
+    const progress = (source, done, total, rowsDone) => {
+      if (onProgress) onProgress(source, done, total, rowsDone);
+      if (EVKIN.progress) {
+        EVKIN.progress({title:'Sinkronisasi import', percent:Math.round(done / Math.max(1,total) * 100),
+          message:`${source}: batch ${done}/${total}, ${Number(rowsDone || 0).toLocaleString('id-ID')} baris...`});
+      }
+    };
+    // Old derived results belong to the previous import and are the only
+    // additional tables intentionally cleared here.
+    try {
+      for (const source of clearedSources) await EVKIN.exportBackend.syncTableChunks(source, [], {onProgress:progress, ...scope});
+      const rawResult = await EVKIN.exportBackend.syncTableChunks('raw_import', canonicalRawRows, {onProgress:progress, ...scope});
+      const persistedRaw = Number(rawResult && rawResult.total_rows);
+      if (!Number.isFinite(persistedRaw) || persistedRaw !== canonicalRawRows.length) {
+        throw new Error(`Verifikasi penyimpanan import gagal: ${Number.isFinite(persistedRaw) ? persistedRaw : 0}/${canonicalRawRows.length} baris tersimpan.`);
+      }
+      // raw_import is the canonical persisted import.  The former workflow_records
+      // JSON copy duplicated every source row and made the database/browser grow
+      // linearly twice; calculation records are restored on demand from raw_import.
+      await EVKIN.exportBackend.syncTableChunks('processed_data', [], {onProgress:progress, ...scope});
+      // Publish configuration last so startup metadata never advertises a new
+      // import before both source tables have completed.
+      await EVKIN.exportBackend.syncTableChunks('config', [config], {onProgress:progress, ...scope});
+    } catch (error) {
+      if (S.workflowMeta) S.workflowMeta.status = 'ERROR';
+      throw error;
+    }
+    if (S.workflowMeta) {
+      S.workflowMeta.workflow_id = workflowId;
+      S.workflowMeta.periode = S.month || null;
+      S.workflowMeta.status = 'ACTIVE';
+      S.workflowMeta.total_row_counts = {...(S.workflowMeta.total_row_counts || {}),
+        raw_import:canonicalRawRows.length, processed_data:0,
+        daily_data:0, rekap_sdm:0, semifinal:0, final_absensi:0,
+        final_skp:0, final_kombinasi:0, final_combined_skp:0};
+      S.workflowMeta.row_counts = {...S.workflowMeta.total_row_counts};
+    }
+    S.workflowLoaded = {};
+    if (EVKIN.progress) EVKIN.progress({title:'Sinkronisasi import', percent:100, message:'Import tersimpan lengkap.', state:'done'});
+    return {status:'ok', counts:{raw_import:canonicalRawRows.length, processed_data:0}};
   };
 
   EVKIN.saveWorkflowToIndexedDB = async function () {
@@ -252,7 +355,7 @@
     }
   };
 
-  EVKIN.go = function (id) {
+  EVKIN.go = async function (id) {
     // Non-workflow modules bypass lock check
     const bypassLock = ['dashboard', 'audit-viewer', 'pembulatan', 'master-sdm', 'reconcile'];
 
@@ -287,6 +390,11 @@
     const main = document.getElementById('main');
     main.innerHTML = '';
     try {
+      if (typeof EVKIN.ensureWorkflowDataForModule === 'function') {
+        main.innerHTML = '<div class="card"><div class="alert info">Memuat data modul secara bertahap...</div></div>';
+        await EVKIN.ensureWorkflowDataForModule(id);
+      }
+      main.innerHTML = '';
       mod.render(main);
     } catch (e) {
       console.error(e);
@@ -340,7 +448,7 @@
   EVKIN.confirmResetWorkflow = async function (button) {
     if (EVKIN.deletingAbsensi) return;
     if (!EVKIN.requireBackend('Aktifkan backend sebelum mereset seluruh data workflow.')) return;
-    if (prompt('Reset SELURUH data workflow untuk SEMUA periode? Data impor absensi, konfigurasi workflow, Harian, Semi Final, Rekap SDM, dan Final akan dihapus dari database dan cache browser. Master SDM, Penilaian SKP, arsip Tukin, dan Master Pengembalian tetap disimpan. Tindakan ini tidak dapat dibatalkan. Ketik HAPUS ABSENSI untuk melanjutkan:') !== 'HAPUS ABSENSI') return;
+    if (prompt('Reset SELURUH data workflow untuk SEMUA periode? Data impor absensi, konfigurasi workflow, Harian, Semi Final, Rekap SDM, dan Final akan dihapus dari database dan cache browser. Master SDM, Penilaian SKP, arsip Tukin tetap disimpan. Tindakan ini tidak dapat dibatalkan. Ketik HAPUS ABSENSI untuk melanjutkan:') !== 'HAPUS ABSENSI') return;
     const original = button.innerHTML;
     button.disabled = true;
     button.textContent = 'Mereset data workflow...';
@@ -372,22 +480,28 @@
     };
 
     const byId = id => EVKIN.STEPS.find(s => s.id === id);
-    const primary = ['dashboard', 'master-sdm', 'skp-assessment'].map(byId).filter(Boolean);
-    const workflow = ['import', 'config', 'harian', 'semifinal', 'rekap', 'final', 'final-tukin', 'final-tukin-results', 'export'].map(byId).filter(Boolean);
-    const tools = ['tukin-annual', 'master-pengembalian', 'reconcile', 'pembulatan'].map(byId).filter(Boolean);
+    const item = (id, label) => ({...byId(id), label:label || byId(id)?.label});
     const auditItem = { id: 'audit-viewer', label: 'Audit Log', icon: 'activity' };
+    const attendanceWorkflow = ['import', 'config', 'harian', 'semifinal', 'rekap', 'export']
+      .map(byId).filter(Boolean);
+    const tukinWorkflow = ['tukin-annual', 'final-tukin', 'final-tukin-results', 'final']
+      .map(byId).filter(Boolean);
 
     nav.innerHTML = `
-      <div class="nav-section"><div class="nav-section-label">Utama</div>${primary.map(s => renderItem(s, false)).join('')}</div>
-      <div class="nav-section"><div class="nav-section-label">Workflow</div>${workflow.map(s => renderItem(s, true)).join('')}
-        <button type="button" class="btn btn-danger btn-sm workflow-reset" id="workflowResetAll" data-testid="workflow-reset-all" title="Hapus data impor dan hasil proses workflow semua periode"><i data-lucide="trash-2"></i><span>Reset Seluruh Data Workflow</span></button>
-      </div>
-      <div class="nav-section"><div class="nav-section-label">Data &amp; Tools</div>${tools.map(s => renderItem(s, false)).join('')}${renderItem(auditItem, false)}</div>`;
+      <div class="nav-section"><div class="nav-section-label">Dashboard</div>${renderItem(item('dashboard','Dashboard'), false)}</div>
+      <div class="nav-section"><div class="nav-section-label">Workflow Absensi</div>${attendanceWorkflow.map(step => renderItem(step, true)).join('')}<button type="button" class="btn btn-danger btn-sm workflow-reset" id="workflowResetAll" data-testid="workflow-reset-all" title="Hapus data impor dan hasil proses workflow semua periode"><i data-lucide="trash-2"></i><span>Reset Seluruh Data Workflow</span></button></div>
+      <div class="nav-section"><div class="nav-section-label">Penilaian SKP</div>${renderItem(item('skp-assessment','Proses SKP'), false)}</div>
+      <div class="nav-section"><div class="nav-section-label">Pengelolaan Tukin</div>${tukinWorkflow.map(step => renderItem(step, false)).join('')}</div>
+      <div class="nav-section"><div class="nav-section-label">Data & Tools</div>${renderItem(item('reconcile','Rekonsiliasi'), false)}${renderItem(byId('pembulatan'), false)}</div>
+      <div class="nav-section"><div class="nav-section-label">Admin</div>${renderItem(item('master-sdm','Master SDM'), false)}<div class="nav-item" data-nav="skp-assessment" data-skp-tab="configuration"><i data-lucide="settings-2"></i><span class="ni-label">Pengaturan SKP</span></div>${renderItem(auditItem, false)}</div>
+      `;
 
     nav.querySelector('#workflowResetAll').onclick = (event) => EVKIN.confirmResetWorkflow(event.currentTarget);
 
     // Attach navigation handlers
     nav.querySelectorAll('[data-nav]').forEach(n => n.onclick = () => {
+      if (n.dataset.skpTab && EVKIN.skpAssessmentMod?.selectTab) EVKIN.skpAssessmentMod.selectTab(n.dataset.skpTab);
+      else if (n.dataset.nav === 'skp-assessment' && EVKIN.skpAssessmentMod?.selectTab) EVKIN.skpAssessmentMod.selectTab('overview');
       EVKIN.go(n.dataset.nav);
       if (window.matchMedia('(max-width: 860px)').matches) document.body.classList.remove('sidebar-collapsed');
     });
@@ -395,9 +509,12 @@
   }
 
   function renderStepper() {
-    const wf = EVKIN.STEPS.filter(s => s.workflow !== false && s.id !== 'dashboard' && s.id !== 'export');
+    const attendanceIds = ['import', 'config', 'harian', 'semifinal', 'rekap', 'export'];
+    const isAttendance = attendanceIds.includes(current);
+    const wf = attendanceIds.map(byId).filter(Boolean);
     const bar = document.getElementById('stepper');
-    bar.classList.toggle('is-dashboard', current === 'dashboard');
+    bar.classList.toggle('is-dashboard', !isAttendance);
+    if (!isAttendance) { bar.innerHTML = ''; return; }
     bar.innerHTML = wf.map((s, i) => {
       const done = EVKIN.stepDone(s.id), unlocked = EVKIN.stepUnlocked(s.id);
       let cls = 'step';
@@ -485,7 +602,7 @@
         const dialog = document.createElement('dialog');
         dialog.style.cssText = 'max-width:760px;width:90%;max-height:85vh;overflow:auto;padding:24px;border-radius:12px';
         const esc = EVKIN.util.esc;
-        dialog.innerHTML = `<h2>Reset Total — Master SDM Tetap Disimpan</h2><p>Absensi, SKP, hasil Tukin, pengembalian, rekonsiliasi dan konfigurasi operasional akan dikosongkan untuk semua periode. Tutup tab EVKIN lainnya sebelum melanjutkan.</p><p>${esc(plan.preserved_note)}</p><p>Backup database wajib dibuat dan diverifikasi otomatis sebelum penghapusan. Pemulihan backup dilakukan secara administratif, bukan tombol Undo.</p><details><summary>Rincian ${plan.deleted_rows} baris yang akan dihapus</summary><ul>${plan.tables.filter(t => t.action === 'DELETE').map(t => `<li>${esc(t.table)}: ${t.rows} baris</li>`).join('')}</ul></details>${plan.blockers.length ? `<p class="alert error">Reset diblokir: ${plan.blockers.map(esc).join('; ')}</p>` : ''}<p><label>Nama petugas <input id="resetActor" autocomplete="off"></label></p><p><label>Alasan reset <input id="resetReason" autocomplete="off"></label></p><p><label>Ketik RESET TOTAL TANPA MASTER SDM <input id="resetPhrase" autocomplete="off"></label></p><div class="actions-row"><button id="resetCancel" class="btn btn-secondary">Batal</button><button id="resetConfirm" class="btn btn-danger" disabled>Backup &amp; Reset Total</button></div><p id="resetProgress"></p>`;
+        dialog.innerHTML = `<h2>Reset Data Operasional</h2><p>Reset Data Operasional menghapus data workflow/transaksi dari server dan membersihkan cache browser. Master SDM, konfigurasi protected, dan audit tetap dipertahankan.</p><p>${esc(plan.preserved_note)}</p><p>Backup database wajib dibuat dan diverifikasi otomatis sebelum penghapusan. Pemulihan backup dilakukan secara administratif, bukan tombol Undo.</p><details><summary>Rincian ${plan.deleted_rows} baris yang akan dihapus</summary><ul>${plan.tables.filter(t => t.action === 'DELETE').map(t => `<li>${esc(t.table)}: ${t.rows} baris</li>`).join('')}</ul></details>${plan.blockers.length ? `<p class="alert error">Reset diblokir: ${plan.blockers.map(esc).join('; ')}</p>` : ''}<p><label>Nama petugas <input id="resetActor" autocomplete="off"></label></p><p><label>Alasan reset <input id="resetReason" autocomplete="off"></label></p><p><label>Ketik RESET TOTAL TANPA MASTER SDM <input id="resetPhrase" autocomplete="off"></label></p><div class="actions-row"><button id="resetCancel" class="btn btn-secondary">Batal</button><button id="resetConfirm" class="btn btn-danger" disabled>Backup &amp; Reset Data Operasional</button></div><p id="resetProgress"></p>`;
         document.body.appendChild(dialog);
         dialog.showModal();
         await new Promise(resolve => {
@@ -504,11 +621,17 @@
             try {
               const result = await request('confirm', {preview_token:plan.preview_token, actor:field('#resetActor'), reason:field('#resetReason'), confirmation:field('#resetPhrase')});
               completed = true;
-              progress.textContent = `Reset selesai: ${result.deleted_rows} baris. Master SDM tetap disimpan. Backup: ${result.backup_path}`;
+              if (EVKIN.exportBackend) EVKIN.exportBackend.mutationBlocked = true;
+              if (EVKIN.db?.markCacheStale) EVKIN.db.markCacheStale();
+              let cacheResult = {ok:false, status:'ERROR', error:'Fitur cache browser tidak tersedia.'};
               try {
-                if (EVKIN.db?.replaceStore) await Promise.all(['workflow_config','raw_import','daily_data','rekap_sdm','final_absensi','final_skp','final_kombinasi','final_combined_skp'].map(name => EVKIN.db.replaceStore(name, [])));
+                cacheResult = await EVKIN.clearBrowserCache();
                 sessionStorage.removeItem('mp-final-filters');
-              } catch (_) { progress.textContent += ' Cache browser gagal dibersihkan; tutup tab lain dan bersihkan cache sebelum melanjutkan.'; }
+              } catch (_) { /* clearBrowserCache already normalizes errors */ }
+              const outcome = EVKIN.db?.resetOutcome
+                ? EVKIN.db.resetOutcome(true, cacheResult)
+                : {status:'PARTIAL_SUCCESS', message:'Reset data server berhasil. Cache browser belum berhasil dibersihkan.'};
+              progress.textContent = `${outcome.message} ${result.deleted_rows} baris dihapus. Master SDM tetap disimpan. Backup: ${result.backup_path}`;
               button.textContent = 'Muat Ulang Aplikasi'; button.disabled = false;
               button.onclick = () => window.location.reload();
             } catch (error) {
@@ -523,17 +646,12 @@
       finally { if (!completed) { EVKIN.deletingAbsensi = false; totalReset.disabled = false; } }
     };
     if (topbarDbReset) topbarDbReset.onclick = async () => {
-      if (!confirm('Hapus cache IndexedDB dan reset hasil workflow? Data sumber dan Master SDM backend tetap dipertahankan.')) return;
+      if (!confirm('Bersihkan cache browser di perangkat ini? Data server tidak akan diubah.')) return;
       if (profileMenu) profileMenu.removeAttribute('open');
-      try {
-        if (EVKIN.db && typeof EVKIN.db.resetDatabase === 'function') await EVKIN.db.resetDatabase();
-        await EVKIN.resetAll();
-        EVKIN.go('dashboard');
-        EVKIN.toast('Database berhasil direset', 'success');
-      } catch (error) {
-        console.error('Reset database gagal:', error);
-        EVKIN.toast('Database gagal direset', 'error');
-      }
+      const result = await EVKIN.clearBrowserCache();
+      if (result.status === 'SUCCESS') EVKIN.toast('Cache browser berhasil dibersihkan.', 'success');
+      else if (result.status === 'BLOCKED') EVKIN.toast('Cache browser masih digunakan tab EVKIN lain. Tutup tab lain lalu coba lagi.', 'warning');
+      else EVKIN.toast('Cache browser belum berhasil dibersihkan: ' + (result.error || result.status), 'warning');
     };
     const backendButton = document.getElementById('backendToggle');
     const backendStatus = document.getElementById('backendStatus');

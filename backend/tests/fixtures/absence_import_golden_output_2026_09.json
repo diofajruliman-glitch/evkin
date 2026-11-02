@@ -1,0 +1,328 @@
+{
+  "baseline": "ABSENCE_IMPORT_JS_LEGACY_2026_09",
+  "cases": [
+    {
+      "id": "IMP-NORMAL-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1001",
+        "nama": "Normal",
+        "jabatan": "Guru",
+        "date": "2026-08-01",
+        "out_date": "",
+        "check_in": "07:30:00",
+        "check_out": "16:00:00",
+        "check_in_minutes": 450,
+        "check_out_minutes": 960,
+        "check_in_wib": 450,
+        "check_out_wib": 960,
+        "check_in_add": 450,
+        "check_out_add": 960,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-EMPTY-IN-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1002",
+        "nama": "Missing In",
+        "jabatan": "Guru",
+        "date": "2026-08-02",
+        "out_date": "",
+        "check_in": "",
+        "check_out": "16:00:00",
+        "check_in_minutes": null,
+        "check_out_minutes": 960,
+        "check_in_wib": null,
+        "check_out_wib": 960,
+        "check_in_add": null,
+        "check_out_add": 960,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": [
+          "Jam masuk kosong"
+        ]
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-EMPTY-OUT-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1003",
+        "nama": "Missing Out",
+        "jabatan": "Guru",
+        "date": "2026-08-03",
+        "out_date": "",
+        "check_in": "07:30:00",
+        "check_out": "",
+        "check_in_minutes": 450,
+        "check_out_minutes": null,
+        "check_in_wib": 450,
+        "check_out_wib": null,
+        "check_in_add": 450,
+        "check_out_add": null,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": [
+          "Jam pulang kosong"
+        ]
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-EMPTY-BOTH-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1004",
+        "nama": "Missing Both",
+        "jabatan": "Guru",
+        "date": "2026-08-04",
+        "out_date": "",
+        "check_in": "",
+        "check_out": "",
+        "check_in_minutes": null,
+        "check_out_minutes": null,
+        "check_in_wib": null,
+        "check_out_wib": null,
+        "check_in_add": null,
+        "check_out_add": null,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": [
+          "Jam masuk kosong",
+          "Jam pulang kosong"
+        ]
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-FLEXI-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1005",
+        "nama": "Flexi",
+        "jabatan": "Guru",
+        "date": "2026-08-05",
+        "out_date": "",
+        "check_in": "08:30:00",
+        "check_out": "17:00:00",
+        "check_in_minutes": 510,
+        "check_out_minutes": 1020,
+        "check_in_wib": 510,
+        "check_out_wib": 1020,
+        "check_in_add": 510,
+        "check_out_add": 1020,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-WITA-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1006",
+        "nama": "WITA",
+        "jabatan": "Guru",
+        "date": "2026-08-06",
+        "out_date": "",
+        "check_in": "08:30:00",
+        "check_out": "17:00:00",
+        "check_in_minutes": 510,
+        "check_out_minutes": 1020,
+        "check_in_wib": 450,
+        "check_out_wib": 960,
+        "check_in_add": 570,
+        "check_out_add": 1080,
+        "zone": "WITA",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-WIT-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1007",
+        "nama": "WIT",
+        "jabatan": "Guru",
+        "date": "2026-08-07",
+        "out_date": "",
+        "check_in": "09:30:00",
+        "check_out": "18:00:00",
+        "check_in_minutes": 570,
+        "check_out_minutes": 1080,
+        "check_in_wib": 450,
+        "check_out_wib": 960,
+        "check_in_add": 690,
+        "check_out_add": 1200,
+        "zone": "WIT",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-EXCEL-DATE-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1008",
+        "nama": "Excel Date",
+        "jabatan": "Guru",
+        "date": "2026-08-01",
+        "out_date": "",
+        "check_in": "07:30:00",
+        "check_out": "16:00:00",
+        "check_in_minutes": 450,
+        "check_out_minutes": 960,
+        "check_in_wib": 450,
+        "check_out_wib": 960,
+        "check_in_add": 450,
+        "check_out_add": 960,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-SECONDS-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1009",
+        "nama": "Seconds",
+        "jabatan": "Guru",
+        "date": "2026-08-09",
+        "out_date": "",
+        "check_in": "07:30:29",
+        "check_out": "16:00:30",
+        "check_in_minutes": 450,
+        "check_out_minutes": 961,
+        "check_in_wib": 450,
+        "check_out_wib": 961,
+        "check_in_add": 450,
+        "check_out_add": 961,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-CROSS-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1010",
+        "nama": "Cross Midnight",
+        "jabatan": "Wali Asuh",
+        "date": "2026-08-10",
+        "out_date": "11/08/2026",
+        "check_in": "20:00:00",
+        "check_out": "06:00:00",
+        "check_in_minutes": 1200,
+        "check_out_minutes": 360,
+        "check_in_wib": 1200,
+        "check_out_wib": 360,
+        "check_in_add": 1200,
+        "check_out_add": 360,
+        "zone": "WIB",
+        "cross_day": true,
+        "issues": []
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-MALFORMED-TIME-001",
+      "invalid": false,
+      "normalized": {
+        "nip": "1011",
+        "nama": "Bad Time",
+        "jabatan": "Guru",
+        "date": "2026-08-11",
+        "out_date": "",
+        "check_in": "",
+        "check_out": "",
+        "check_in_minutes": null,
+        "check_out_minutes": null,
+        "check_in_wib": null,
+        "check_out_wib": null,
+        "check_in_add": null,
+        "check_out_add": null,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": [
+          "Jam masuk tidak valid",
+          "Jam pulang tidak valid",
+          "Jam masuk kosong",
+          "Jam pulang kosong"
+        ]
+      },
+      "duplicate": false
+    },
+    {
+      "id": "IMP-MALFORMED-DATE-001",
+      "invalid": true,
+      "normalized": null,
+      "duplicate": false
+    },
+    {
+      "id": "IMP-MISSING-NIP-001",
+      "invalid": true,
+      "normalized": null,
+      "duplicate": false
+    },
+    {
+      "id": "IMP-DUP-001A",
+      "invalid": false,
+      "normalized": {
+        "nip": "1014",
+        "nama": "Duplicate",
+        "jabatan": "Guru",
+        "date": "2026-08-14",
+        "out_date": "",
+        "check_in": "07:30:00",
+        "check_out": "16:00:00",
+        "check_in_minutes": 450,
+        "check_out_minutes": 960,
+        "check_in_wib": 450,
+        "check_out_wib": 960,
+        "check_in_add": 450,
+        "check_out_add": 960,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": true
+    },
+    {
+      "id": "IMP-DUP-001B",
+      "invalid": false,
+      "normalized": {
+        "nip": "1014",
+        "nama": "Duplicate",
+        "jabatan": "Guru",
+        "date": "2026-08-14",
+        "out_date": "",
+        "check_in": "08:00:00",
+        "check_out": "16:00:00",
+        "check_in_minutes": 480,
+        "check_out_minutes": 960,
+        "check_in_wib": 480,
+        "check_out_wib": 960,
+        "check_in_add": 480,
+        "check_out_add": 960,
+        "zone": "WIB",
+        "cross_day": false,
+        "issues": []
+      },
+      "duplicate": true
+    }
+  ]
+}

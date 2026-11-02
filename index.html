@@ -50,13 +50,12 @@
             <summary class="profile-trigger" aria-label="Menu EVKIN"><span>EV</span><i data-lucide="chevron-down"></i></summary>
             <div class="profile-popover">
               <div class="profile-heading"><strong>EVKIN</strong><small>Evkin Tools Diocode v.1.5</small></div>
-              <button type="button" data-topbar-go="master-pengembalian"><i data-lucide="refresh-cw"></i> Master Pengembalian</button>
               <button type="button" data-topbar-go="reconcile"><i data-lucide="scale"></i> Rekonsiliasi</button>
               <button type="button" data-topbar-go="audit-viewer"><i data-lucide="activity"></i> Audit Log</button>
               <div class="profile-divider"></div>
-              <button type="button" id="topbarDbReset"><i data-lucide="database"></i> Reset Cache &amp; Hasil Workflow</button>
+              <button type="button" id="topbarDbReset"><i data-lucide="database"></i> Bersihkan Cache Browser</button>
               <button type="button" id="topbarResetAll" class="profile-danger"><i data-lucide="trash-2"></i> Reset Hasil Workflow</button>
-              <button type="button" id="topbarTotalReset" class="profile-danger"><i data-lucide="trash-2"></i> Reset Total (Tanpa Master SDM)</button>
+              <button type="button" id="topbarTotalReset" class="profile-danger"><i data-lucide="trash-2"></i> Reset Data Operasional</button>
             </div>
           </details>
         </div>
@@ -71,7 +70,7 @@
   <script src="assets/vendor/lucide.min.js"></script>
   <script src="assets/js/utils.js"></script>
   <script src="assets/js/data.js"></script>
-  <script src="assets/js/state.js"></script>
+  <script src="assets/js/state.js?v=20260930-csv-workflow-handoff-v1"></script>
   <script src="assets/js/calc.js"></script>  <!-- Note: export-worker.js is loaded dynamically by export.js via Web Worker API -->  <script src="assets/js/import.js"></script>
   <script src="assets/js/import-wali.js"></script>
   <script src="assets/js/import-advanced.js"></script>
@@ -87,10 +86,8 @@
   <script src="assets/js/audit-viewer.js"></script>
   <script src="assets/js/evkin-db.js"></script>
   <script src="assets/js/export-backend.js?v=20260831-aurora-precision"></script>
+  <script src="assets/js/import-backend.js?v=20260930-csv-workflow-handoff-v1"></script>
   <script src="assets/js/export.js"></script>
-  <script src="assets/js/master-pengembalian.js"></script>
-  <script src="assets/js/master-pengembalian-additions.js"></script>
-  <script src="assets/js/master-pengembalian-monthly.js"></script>
   <script src="assets/js/dashboard.js?v=20260831-aurora-precision-v2"></script>
   <script src="assets/js/pembulatan.js"></script>
   <script src="assets/js/skp-assessment.js?v=20260901-third-skp-unpaid-v1"></script>

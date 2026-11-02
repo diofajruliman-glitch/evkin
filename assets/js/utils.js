@@ -31,7 +31,9 @@
     } else {
       const s = String(v).trim();
       let mt;
-      if ((mt = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/))) {
+      if (/^\d+(?:\.\d+)?$/.test(s) && Number(s) >= 60) {
+        const r = U.excelSerialToDate(Number(s)); y = r.y; m = r.m; d = r.d;
+      } else if ((mt = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/))) {
         y = +mt[1]; m = +mt[2]; d = +mt[3];
       } else if ((mt = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/))) {
         d = +mt[1]; m = +mt[2]; y = +mt[3];
@@ -69,32 +71,60 @@
     return U.makeDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
   };
 
+  function formatCanonicalSeconds(totalSeconds) {
+    const normalized = ((totalSeconds % 86400) + 86400) % 86400;
+    const hours = Math.floor(normalized / 3600);
+    const minutes = Math.floor((normalized % 3600) / 60);
+    const seconds = normalized % 60;
+    return `${U.pad(hours)}:${U.pad(minutes)}:${U.pad(seconds)}`;
+  }
+
+  U.normalizeExcelTime = function normalizeExcelTime(value) {
+    if (value === null || value === undefined || value === '') return '';
+
+    if (typeof value === 'string') {
+      const s = String(value).trim();
+      if (s === '') return '';
+      const dec = s.replace(/\s+/g, '').replace(',', '.');
+      if (/^-?\d+(?:\.\d+)?$/.test(dec)) {
+        return U.normalizeExcelTime(Number(dec));
+      }
+      const mt = s.match(/^(\d{1,2})[:.](\d{2})(?::(\d{2}))?$/);
+      if (mt) {
+        const h = Number(mt[1]);
+        const mi = Number(mt[2]);
+        const sec = mt[3] === undefined ? 0 : Number(mt[3]);
+        if (h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && sec >= 0 && sec <= 59) {
+          return `${U.pad(h)}:${U.pad(mi)}:${U.pad(sec)}`;
+        }
+      }
+      return '';
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value < 0) return '';
+      if (value >= 1) {
+        const frac = value - Math.floor(value);
+        if (frac === 0) return '';
+        const seconds = Math.round(frac * 86400) % 86400;
+        return formatCanonicalSeconds(seconds);
+      }
+      const seconds = Math.round(value * 86400) % 86400;
+      return formatCanonicalSeconds(seconds);
+    }
+
+    return '';
+  };
+
   // Parse jam -> menit sejak tengah malam, atau null
   U.parseTime = function (v) {
-    if (v === null || v === undefined || v === '') return null;
-    if (typeof v === 'number') {
-      let frac = v;
-      if (v >= 1) frac = v - Math.floor(v);
-      if (frac === 0 && v >= 1) return null; // tanggal tanpa jam
-      let mins = Math.round(frac * 1440);
-      if (mins >= 1440) mins -= 1440;
-      return mins;
-    }
-    let s = String(v).trim();
-    if (s === '') return null;
-    let ampm = null;
-    const am = s.match(/(am|pm)$/i);
-    if (am) { ampm = am[1].toLowerCase(); s = s.replace(/(am|pm)$/i, '').trim(); }
-    let mt;
-    let h, mi;
-    if ((mt = s.match(/^(\d{1,2})[:.](\d{2})(?::\d{2})?$/))) { h = +mt[1]; mi = +mt[2]; }
-    else if ((mt = s.match(/^(\d{2})(\d{2})$/))) { h = +mt[1]; mi = +mt[2]; }
-    else if ((mt = s.match(/^(\d{1,2})$/))) { h = +mt[1]; mi = 0; }
-    else return null;
-    if (ampm === 'pm' && h < 12) h += 12;
-    if (ampm === 'am' && h === 12) h = 0;
-    if (h > 23 || mi > 59) return null;
-    return h * 60 + mi;
+    const canonical = U.normalizeExcelTime(v);
+    if (canonical === '') return null;
+    const parts = canonical.split(':').map(Number);
+    if (parts.length !== 3 || parts.some(p => Number.isNaN(p))) return null;
+    const [h, mi, sec] = parts;
+    if (h > 23 || mi > 59 || sec > 59) return null;
+    return h * 60 + mi + (sec >= 30 ? 1 : 0);
   };
 
   U.fmtTime = function (mins) {

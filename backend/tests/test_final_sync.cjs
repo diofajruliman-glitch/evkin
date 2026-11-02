@@ -27,12 +27,17 @@ async function main() {
   E.state.raw=Array.from({length:15001},(_,i)=>({nip:String(i),tanggal:'2026-08-01'}));
   E.state.data=E.state.raw.map(row=>({...row,tanggal:{monthKey:'2026-08',key:'2026-08-01'}}));
   E.state.workflowMeta={row_counts:{},total_row_counts:{}};E.state.workflowLoaded={};
-  E.exportBackend.syncTableChunks=async(source,rows)=>{tableWrites.push([source,rows.length]);return {status:'ok',total_rows:rows.length};};
+  E.exportBackend.syncTableChunks=async(source,rows)=>{tableWrites.push([source,rows.length,rows[0]]);return {status:'ok',total_rows:rows.length};};
   await E.syncImportedWorkflow();
   assert.equal(syncCalls,beforeImportSyncCalls,'Import must not call full workflow sync');
-  assert.deepEqual(tableWrites.filter(([source])=>['raw_import','processed_data'].includes(source)),[
+  assert.deepEqual(tableWrites.filter(([source])=>['raw_import','processed_data'].includes(source)).map(row=>row.slice(0,2)),[
     ['raw_import',15001],['processed_data',0]
   ]);
+  const persistedLegacy = tableWrites.find(([source])=>source==='raw_import')[2];
+  assert.equal(persistedLegacy.workflow_id,E.state.workflowMeta.workflow_id);
+  assert.equal(persistedLegacy.source_format,'legacy_excel');
+  assert.equal(persistedLegacy.tanggal,'2026-08-01');
+  assert.equal(Object.keys(persistedLegacy).length,17,'Legacy Excel persistence must use the canonical raw_import schema');
   assert.ok(tableWrites.some(([source,count])=>source==='daily_data'&&count===0));
   assert.ok(!tableWrites.some(([source])=>source==='master_data'));
   assert.equal(E.state.workflowMeta.status,'ACTIVE');
@@ -42,7 +47,7 @@ async function main() {
   E.state.data=E.state.raw.map(row=>({...row,tanggal:{monthKey:'2026-08',key:'2026-08-01'}}));
   await E.syncImportedWorkflow();
   assert.equal(syncCalls,beforeImportSyncCalls,'Small import must also avoid the legacy JSON sync');
-  assert.deepEqual(tableWrites.filter(([source])=>['raw_import','processed_data'].includes(source)),[
+  assert.deepEqual(tableWrites.filter(([source])=>['raw_import','processed_data'].includes(source)).map(row=>row.slice(0,2)),[
     ['raw_import',10],['processed_data',0]
   ]);
   E.exportBackend.syncTableChunks=async(source,rows)=>{

@@ -243,6 +243,12 @@ def build(db_path, period, canonical=False):
         raise ValueError('Periode penilaian harus YYYY-MM')
     master = SharedMasterService(db_path).snapshot_map(period, fallback_latest_profile=True)
     with duckdb.connect(db_path) as conn:
+        # The gate is a no-op while JS_LEGACY/PYTHON_SHADOW is configured.
+        # Once PYTHON_CANONICAL is explicitly activated, Tukin may only consume
+        # a COMPLETED canonical Absence batch for this period.
+        from backend.absence_cutover import assert_canonical_absence_ready
+        assert_canonical_absence_ready(conn, period)
+
         def read(table, period_column=None):
             exists = conn.execute('SELECT count(*) FROM information_schema.tables WHERE table_name=?', [table]).fetchone()[0]
             if not exists:

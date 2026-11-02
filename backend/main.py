@@ -2,13 +2,15 @@ from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import duckdb
-import pandas as pd
+from backend.lazy_imports import lazy_module
+
+pd = lazy_module("pandas")
 from typing import Optional
 import os
 from pathlib import Path
 from fastapi.responses import StreamingResponse
 import io
-from backend.runtime_guard import claim_database, serialize_database_requests
+from backend.runtime_guard import claim_database, initialize_runtime_state, serialize_database_requests
 from backend.security import ApiKeyMiddleware, CORS_HEADERS, CORS_METHODS, allowed_origins
 
 # Use same DuckDB file as backend by default (configurable via EVKIN_DUCKDB_PATH env var)
@@ -24,6 +26,7 @@ app.add_middleware(ApiKeyMiddleware)
 @app.on_event('startup')
 def claim_analytics_database():
     claim_database(DUCKDB_PATH)
+    initialize_runtime_state(DUCKDB_PATH)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
@@ -38,15 +41,6 @@ app.add_middleware(
 def get_conn():
     return duckdb.connect(database=DUCKDB_PATH, read_only=False)
 
-# Attempt to mount pengembalian_api if present (non-fatal)
-try:
-    import importlib
-    _peng = importlib.import_module('backend.pengembalian_api')
-    app.include_router(_peng.router, prefix='/pengembalian')
-    print('Mounted pengembalian_api at /pengembalian')
-except Exception as _e:
-    # non-fatal: API will not be mounted if module missing
-    pass
 
 # Attempt to mount generic_compare_api if present (non-fatal)
 try:

@@ -11,6 +11,7 @@
   }
 
   mod.process = async function (options = {}) {
+    if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['daily_data']);
     if (!S.daily.length) throw new Error('Belum ada hasil Hitung Harian.');
     if (!S.semifinalVerified) throw new Error('Verifikasi Semi Final sebelum memproses Rekap SDM.');
     const ctx = C.buildContext();
@@ -211,7 +212,8 @@
       ${paginationInfo}
       ${paginationButtons}
       <div class="actions-row"><button class="btn btn-ghost" onclick="EVKIN.go('semifinal')"><i data-lucide="arrow-left"></i> Kembali</button>
-      <button class="btn btn-primary" id="rekapToFinal">Lanjut: Final <i data-lucide="arrow-right"></i></button></div></div>`;
+      <button class="btn btn-secondary" id="rekapToExport"><i data-lucide="file-down"></i> Export Rekap Absensi</button>
+      <button class="btn btn-primary" id="rekapToTukin">Lanjut: Pengelolaan Tukin (70/30) <i data-lucide="arrow-right"></i></button></div></div>`;
 
     bindGuidance();
     el.querySelector('#btnRekap2').onclick = async () => {
@@ -221,7 +223,12 @@
       catch (error) { if (EVKIN.progress) EVKIN.progress({title: 'Rekap SDM gagal', message: error.message, state: 'error'}); EVKIN.toast('Rekap gagal: ' + error.message, 'error'); }
       finally { button.disabled = false; }
     };
-    el.querySelector('#rekapToFinal').onclick = () => {if(monthFilter) S.month=monthFilter; EVKIN.go('final');};
+    const btnExport = el.querySelector('#rekapToExport');
+    if (btnExport) btnExport.onclick = () => { if (monthFilter) S.month = monthFilter; EVKIN.go('export'); };
+    const btnTukin = el.querySelector('#rekapToTukin');
+    if (btnTukin) btnTukin.onclick = () => { if (monthFilter) S.month = monthFilter; EVKIN.go('tukin-annual'); };
+    const btnFinal = el.querySelector('#rekapToFinal');
+    if (btnFinal) btnFinal.onclick = () => { if (monthFilter) S.month = monthFilter; EVKIN.go('final'); };
     el.querySelector('#rekapMonthFilter').onchange = e => {monthFilter=e.target.value; S.rekapPage=0; EVKIN.go('rekap');};
     el.querySelector('#rekapPageSize').onchange = e => {pageSize=Number(e.target.value); S.rekapPage=0; EVKIN.go('rekap');};
     el.querySelector('#rekapNipSearch').oninput = (e) => {

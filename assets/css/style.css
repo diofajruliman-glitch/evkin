@@ -454,6 +454,27 @@ input:focus, select:focus, textarea:focus {
 .process-progress-meta { margin-top: 8px; color: var(--gray); font-size: 12px; }
 .process-progress.done .process-progress-bar { background: var(--emerald); }
 .process-progress.error .process-progress-bar { background: #c0392b; }
+
+.harian-process { margin-bottom: 16px; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
+.harian-process.active { border-color: var(--blue); background: var(--blue-soft); }
+.harian-process.done { border-color: var(--emerald); background: var(--emerald-soft); }
+.harian-process.error { border-color: var(--red); background: var(--red-soft); }
+.harian-process-head, .harian-process-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.harian-process-head strong { display: flex; align-items: center; gap: 10px; font-size: 17px; }
+.harian-process-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; list-style: none; margin: 18px 0; }
+.harian-process-steps li { display: flex; align-items: center; gap: 8px; color: var(--gray); font-size: 13px; }
+.harian-process-steps li span { flex-shrink: 0; display: grid; place-items: center; width: 25px; height: 25px; border-radius: 50%; background: var(--gray-soft); border: 1px solid var(--line); }
+.harian-process-steps li.current { color: var(--blue); font-weight: 700; }
+.harian-process-steps li.current span { background: var(--blue); color: white; }
+.harian-process-steps li.complete { color: var(--emerald); }
+.harian-process-steps li.complete span { background: var(--emerald); color: white; }
+.harian-process-bar { display: block; width: 100%; height: 12px; margin-bottom: 12px; accent-color: var(--blue); }
+.harian-process-message { margin: 12px 0; line-height: 1.6; }
+.harian-process-meta { color: var(--ink-soft); font-size: 13px; margin-bottom: 10px; }
+.harian-spinner { width: 18px; height: 18px; border: 3px solid var(--line); border-top-color: var(--blue); border-radius: 50%; animation: harian-spin .9s linear infinite; }
+@keyframes harian-spin { to { transform: rotate(360deg); } }
+@media (max-width: 650px) { .harian-process-steps { grid-template-columns: repeat(2, 1fr); } }
+@media (prefers-reduced-motion: reduce) { .harian-spinner { animation: none; } }
 .import-progress { margin-top: 16px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--gray-soft); }
 .import-progress-head { display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
 .import-progress-track { width: 100%; height: 10px; background: #dde3ea; border-radius: 999px; overflow: hidden; }

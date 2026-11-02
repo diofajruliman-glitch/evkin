@@ -94,13 +94,15 @@ def test_scoped_chunk_replace_preserves_other_workflow(isolated):
     with duckdb.connect(isolated) as conn:
         conn.execute("CREATE OR REPLACE TABLE raw_import(workflow_id VARCHAR,nip VARCHAR,tanggal VARCHAR)")
         conn.execute("INSERT INTO raw_import VALUES ('OTHER','KEEP','2026-08-01')")
-    api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':True,
-                             'rows':[{'workflow_id':'ACTIVE','nip':'FIRST','tanggal':'2026-08-01'}]})
-    api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':False,
-                             'rows':[{'workflow_id':'ACTIVE','nip':'SECOND','tanggal':'2026-08-02'}]})
+    first = api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':True,
+                                     'rows':[{'workflow_id':'ACTIVE','nip':'FIRST','tanggal':'2026-08-01'}]})
+    second = api.sync_workflow_table({'source':'raw_import', 'workflow_id':'ACTIVE', 'replace':False,
+                                      'rows':[{'workflow_id':'ACTIVE','nip':'SECOND','tanggal':'2026-08-02'}]})
     with duckdb.connect(isolated) as conn:
         stored = conn.execute('SELECT workflow_id,nip FROM raw_import ORDER BY workflow_id,nip').fetchall()
     assert stored == [('ACTIVE','FIRST'), ('ACTIVE','SECOND'), ('OTHER','KEEP')]
+    assert first['total_rows'] == 1
+    assert second['total_rows'] == 2
 
 
 def test_chunked_import_matches_bulk_without_touching_master_domains(isolated):

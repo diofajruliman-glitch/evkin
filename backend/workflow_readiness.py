@@ -66,6 +66,41 @@ def _source_signature(rows: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _period_clause(columns: set[str], period: str) -> tuple[str, list[str]]:
+    if "bulan" in columns:
+        return ' WHERE CAST("bulan" AS VARCHAR) = ?', [period]
+    if "monthKey" in columns:
+        return ' WHERE CAST("monthKey" AS VARCHAR) = ?', [period]
+    if "tanggalKey" in columns:
+        return ' WHERE substr(CAST("tanggalKey" AS VARCHAR), 1, 7) = ?', [period]
+    return "", []
+
+
+def _relation_signature(conn: duckdb.DuckDBPyConnection, table: str, period: str) -> str:
+    """Return an order-independent signature without transferring full rows to Python."""
+    if not _table_exists(conn, table):
+        return "0:0:0"
+    columns = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
+    if not columns or columns == ["_empty"]:
+        return "0:0:0"
+    where, params = _period_clause(set(columns), period)
+    quoted = ", ".join(f'"{column.replace(chr(34), chr(34) * 2)}"' for column in sorted(columns))
+    count, total, xor_value = conn.execute(
+        f'SELECT count(*), coalesce(sum(hash({quoted})), 0), '
+        f'coalesce(bit_xor(hash({quoted})), 0) FROM "{table}"{where}',
+        params,
+    ).fetchone()
+    return f"{int(count)}:{int(total)}:{int(xor_value)}"
+
+
+def _database_signature(conn: duckdb.DuckDBPyConnection, period: str) -> str:
+    payload = "|".join([
+        _relation_signature(conn, "hitung_harian", period),
+        _relation_signature(conn, "anomali", period),
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _flag(conn: duckdb.DuckDBPyConnection, period: str) -> bool:
     if not _table_exists(conn, "workflow_flags"):
         return False
@@ -79,14 +114,14 @@ def _flag(conn: duckdb.DuckDBPyConnection, period: str) -> bool:
     return bool(row and int(row[0] or 0))
 
 
-def _stale(conn: duckdb.DuckDBPyConnection, period: str, daily: list[dict[str, Any]], semifinal: list[dict[str, Any]]) -> bool:
+def _stale(conn: duckdb.DuckDBPyConnection, period: str) -> bool:
     if not _table_exists(conn, "workflow_readiness_meta"):
         return False
     row = conn.execute(
         "SELECT source_signature FROM workflow_readiness_meta WHERE period = ?",
         [period],
     ).fetchone()
-    return bool(row and row[0] != _source_signature(daily + semifinal))
+    return bool(row and row[0] != _database_signature(conn, period))
 
 
 def validate_final_readiness(db_path: str, period: str) -> dict[str, Any]:
@@ -161,7 +196,7 @@ def validate_final_readiness(db_path: str, period: str) -> dict[str, Any]:
                 f"Rekap SDM tidak konsisten: {len(daily_by_nip)} NIP Harian, {len(rekap_by_nip)} NIP Rekap."
             )
 
-        if _stale(conn, period, daily, semifinal):
+        if _stale(conn, period):
             result["checks"]["stale_state"] = True
             result["blocking_reasons"].append("Data hulu berubah setelah verifikasi; hitung dan verifikasi ulang.")
 
@@ -174,19 +209,32 @@ def record_verification(db_path: str, period: str) -> dict[str, Any]:
     if not PERIOD_RE.fullmatch(str(period or "")):
         raise ValueError("Periode harus berformat YYYY-MM.")
     with duckdb.connect(str(db_path)) as conn:
-        daily = _rows(conn, "hitung_harian", period)
-        semifinal = _rows(conn, "anomali", period)
-        if _table_exists(conn, "hitung_harian") and not any("bulan" == row[1] for row in conn.execute('PRAGMA table_info("hitung_harian")').fetchall()):
-            daily = _period_rows(_rows(conn, "hitung_harian"), period)
-        if _table_exists(conn, "anomali") and not any("bulan" == row[1] for row in conn.execute('PRAGMA table_info("anomali")').fetchall()):
-            semifinal = _period_rows(_rows(conn, "anomali"), period)
-        if not daily:
+        if not _table_exists(conn, "hitung_harian"):
             raise ValueError("Hasil Hitung Harian belum tersedia.")
-        if not semifinal:
-            raise ValueError("Hasil Semi Final belum tersedia.")
-        keys = [(_nip(row), _date_key(row)) for row in daily]
-        if any(count > 1 for count in Counter(keys).values()):
+        daily_columns = {row[1] for row in conn.execute('PRAGMA table_info("hitung_harian")').fetchall()}
+        if not daily_columns or daily_columns == {"_empty"}:
+            raise ValueError("Hasil Hitung Harian belum tersedia.")
+        where, params = _period_clause(daily_columns, period)
+        daily_count = int(conn.execute(f'SELECT count(*) FROM "hitung_harian"{where}', params).fetchone()[0])
+        if not daily_count:
+            raise ValueError("Hasil Hitung Harian belum tersedia.")
+        nip_column = "nip" if "nip" in daily_columns else ("NIP" if "NIP" in daily_columns else None)
+        date_column = next((name for name in ("tanggalKey", "tanggal", "tgl_finger") if name in daily_columns), None)
+        if not nip_column or not date_column:
+            raise ValueError("Kolom NIP/tanggal pada Hitung Harian tidak lengkap.")
+        q_nip = f'"{nip_column}"'
+        q_date = f'"{date_column}"'
+        duplicates = int(conn.execute(
+            f'SELECT count(*) FROM (SELECT {q_nip}, {q_date}, count(*) n '
+            f'FROM "hitung_harian"{where} GROUP BY {q_nip}, {q_date} HAVING count(*) > 1)',
+            params,
+        ).fetchone()[0])
+        if duplicates:
             raise ValueError("Masih ada duplikat NIP/tanggal pada Hitung Harian.")
+        # Semi Final is an approved snapshot of the canonical daily result.
+        # Materialize it inside DuckDB instead of uploading the same large row
+        # set from the browser a second time.
+        conn.execute('CREATE OR REPLACE TABLE "anomali" AS SELECT * FROM "hitung_harian"')
         conn.execute(
             "CREATE TABLE IF NOT EXISTS workflow_readiness_meta (period VARCHAR PRIMARY KEY, source_signature VARCHAR, updated_at TIMESTAMP)"
         )
@@ -203,6 +251,6 @@ def record_verification(db_path: str, period: str) -> dict[str, Any]:
         )
         conn.execute(
             "INSERT OR REPLACE INTO workflow_readiness_meta (period, source_signature, updated_at) VALUES (?, ?, ?)",
-            [period, _source_signature(daily + semifinal), now],
+            [period, _database_signature(conn, period), now],
         )
-    return {"status": "ok", "period": period, "verified": True}
+    return {"status": "ok", "period": period, "verified": True, "rows": daily_count}

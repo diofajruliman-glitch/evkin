@@ -1,0 +1,21 @@
+{
+  "baseline": "ABSENCE_IMPORT_JS_LEGACY_2026_09",
+  "headers": ["NIP", "Nama", "Jabatan", "Tanggal", "Tanggal Pulang", "Jam Masuk", "Jam Pulang", "Zona", "Provinsi", "Jenis"],
+  "cases": [
+    {"id":"IMP-NORMAL-001","values":["1001","Normal","Guru","2026-08-01","","07:30","16:00","WIB","",""]},
+    {"id":"IMP-EMPTY-IN-001","values":["1002","Missing In","Guru","2026-08-02","","","16:00","WIB","",""]},
+    {"id":"IMP-EMPTY-OUT-001","values":["1003","Missing Out","Guru","2026-08-03","","07:30","","WIB","",""]},
+    {"id":"IMP-EMPTY-BOTH-001","values":["1004","Missing Both","Guru","2026-08-04","","","","WIB","",""]},
+    {"id":"IMP-FLEXI-001","values":["1005","Flexi","Guru","2026-08-05","","08:30","17:00","WIB","",""]},
+    {"id":"IMP-WITA-001","values":["1006","WITA","Guru","2026-08-06","","08:30","17:00","WITA","Bali",""]},
+    {"id":"IMP-WIT-001","values":["1007","WIT","Guru","2026-08-07","","09:30","18:00","WIT","Papua",""]},
+    {"id":"IMP-EXCEL-DATE-001","values":["1008","Excel Date","Guru",46235,"",0.3125,0.666666666666667,"","",""]},
+    {"id":"IMP-SECONDS-001","values":["1009","Seconds","Guru","2026-08-09","","07:30:29","16:00:30","WIB","",""]},
+    {"id":"IMP-CROSS-001","values":["1010","Cross Midnight","Wali Asuh","2026-08-10","2026-08-11","20:00","06:00","WIB","","Bekerja di Kantor"]},
+    {"id":"IMP-MALFORMED-TIME-001","values":["1011","Bad Time","Guru","2026-08-11","","25:90","nope","WIB","",""]},
+    {"id":"IMP-MALFORMED-DATE-001","values":["1012","Bad Date","Guru","not-a-date","","07:30","16:00","WIB","",""]},
+    {"id":"IMP-MISSING-NIP-001","values":["","No NIP","Guru","2026-08-13","","07:30","16:00","WIB","",""]},
+    {"id":"IMP-DUP-001A","values":["1014","Duplicate","Guru","2026-08-14","","07:30","16:00","WIB","",""]},
+    {"id":"IMP-DUP-001B","values":["1014","Duplicate","Guru","2026-08-14","","08:00","16:00","WIB","",""]}
+  ]
+}

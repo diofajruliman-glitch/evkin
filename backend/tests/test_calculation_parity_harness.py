@@ -41,7 +41,7 @@ def test_legacy_js_golden_edge_cases_are_stable():
         "missing_in": (3, "LUPA_ABSEN_MASUK", 3),
         "missing_out": (3, "LUPA_ABSEN_PULANG", 3),
         "cross_day_wali": (0, "LINTAS_HARI", 0),
-        "short_wali": (1.5, "LINTAS_HARI", 1.5),
+        "short_wali": (0, "LINTAS_HARI", 0),
         "holiday_missing": (0, "ABSEN_DI_LUAR_JADWAL", 0),
         "null_empty": (3, "LUPA_ABSEN_MASUK", 3),
     }

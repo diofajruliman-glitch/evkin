@@ -5,8 +5,8 @@
   const S = EVKIN.state;
   const mod = EVKIN.importMod = {};
 
-  mod.LARGE_FILE_THRESHOLD = 5000;
-  mod.BATCH_SIZE = 2000;
+  mod.LARGE_FILE_THRESHOLD = 500;
+  mod.BATCH_SIZE = 500;
 
   const HEADER_MAP = [
     ['nip', ['nip', 'nomorpegawai', 'noindukpegawai']],
@@ -384,13 +384,25 @@
   mod.handleFile = function (file, cb) {
     const reader = new FileReader();
     reader.onload = function (e) {
-      try {
-        const data = new Uint8Array(e.target.result);
-        const wb = XLSX.read(data, { type: 'array', raw: true, cellDates: false });
-        const ws = wb.Sheets[wb.SheetNames[0]];
-        const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
-        cb(null, aoa);
-      } catch (err) { cb(err); }
+      // Yield to browser UI thread to allow progress bar / spinner to paint
+      setTimeout(function () {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const wb = XLSX.read(data, {
+            type: 'array',
+            raw: true,
+            cellDates: false,
+            cellFormula: false,
+            cellHTML: false,
+            cellStyles: false,
+            dense: true,
+            sheets: [0]
+          });
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+          cb(null, aoa);
+        } catch (err) { cb(err); }
+      }, 20);
     };
     reader.onerror = () => cb(new Error('Gagal membaca file'));
     reader.readAsArrayBuffer(file);
@@ -497,8 +509,13 @@
     function doFile(file) {
       const msg = el.querySelector('#importMsg');
       const pickBtn = el.querySelector('#btnPick');
-      msg.innerHTML = '<div class="alert info">Membaca ' + U.esc(file.name) + ' ...</div>';
+      const sizeMb = file.size ? ' (' + (file.size / (1024 * 1024)).toFixed(1) + ' MB)' : '';
+      msg.innerHTML = '<div class="alert info"><i data-lucide="loader-2" class="spin"></i> Membaca ' + U.esc(file.name) + sizeMb + ' ...</div>';
+      if (window.lucide) lucide.createIcons();
       if (pickBtn) pickBtn.disabled = true;
+      setImportProgress(true, { progress: 0, processedCount: 0, totalRecords: 0, currentBatch: 0, totalBatches: 1 });
+      const label = el.querySelector('#importProgressLabel');
+      if (label) label.textContent = 'Membaca struktur file Excel' + sizeMb + '...';
 
       mod.processFile(file, (progress) => setImportProgress(true, progress))
         .then((stats) => {

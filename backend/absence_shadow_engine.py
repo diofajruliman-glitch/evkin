@@ -24,7 +24,7 @@ BASELINE_SOURCE_SHA256 = {
     "assets/js/utils.js": "891a4417df038c1f5f892de4b7240603df72bd7aed02fd3300e7c10b1b6681a0",
     "assets/js/data.js": "3991e8df1ce7d20cc16048f87e9d6c7de4f72fcf9367b8a217ebb6e5c4f87f3e",
     "assets/js/state.js": "4de7593aafb8d78051b3c93188a633d6093617b91d15450ed8937f0dda4dc73b",
-    "assets/js/import.js": "b453f4700821d9c8cbf4cd0554b294593a17d95a389f2c28d75286fe009d4083",
+    "assets/js/import.js": "c5cf4080e4b7e0554b41edf549ba71f9cfeb8876d63e42957d20beb41bb289b7",
     "assets/js/import-wali.js": "4576b67eccc41487808a7721caaaa0febc0955b40e5ad2ac26c6ebaa12525b20",
     "assets/js/calc.js": "586cea0362a5c22aea4cfd28b225e60201579005b1b9259d81a9bf5ea1b6fbe2",
     "assets/js/harian.js": "eb5a92f9212ff67b7977d9406821749616173a5ab539a945dc2f44cecb23e8dc",

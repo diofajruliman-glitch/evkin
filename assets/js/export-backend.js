@@ -469,7 +469,7 @@
   // Serialize table writes with all other workflow writes. Import chunks must
   // arrive in order: first chunk initializes, following chunks append.
   backend.syncTable = function (source, rows, replace, apiBase = backend.apiBase, scope = {}) {
-    const snapshot = JSON.parse(JSON.stringify(Array.isArray(rows) ? rows : []));
+    const snapshot = Array.isArray(rows) ? rows.slice() : [];
     const write = () => writeTable(source, snapshot, replace, apiBase, scope);
     const result = backend.syncQueue.then(write, write);
     backend.syncQueue = result.catch(() => undefined);

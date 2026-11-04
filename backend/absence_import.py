@@ -333,6 +333,165 @@ def _arrow_rows(reader: Any) -> Iterator[dict[str, Any]]:
             yield {name: columns[index][offset] for index, name in enumerate(names)}
 
 
+def _col_idx_from_ref(ref: str) -> int:
+    idx = 0
+    for ch in ref:
+        if "A" <= ch <= "Z":
+            idx = idx * 26 + (ord(ch) - 64)
+        else:
+            break
+    return idx - 1
+
+
+def _estimate_xlsx_row_count(path: Path) -> int | None:
+    try:
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+                    with z.open(name) as f:
+                        head = f.read(16384).decode("utf-8", errors="ignore")
+                        m = re.search(r'<dimension ref="([^"]+)"', head)
+                        if m:
+                            parts = m.group(1).split(":")
+                            if len(parts) == 2:
+                                row_str = re.sub(r"^[A-Za-z]+", "", parts[1])
+                                if row_str.isdigit():
+                                    return int(row_str)
+                    break
+    except Exception:
+        pass
+    return None
+
+
+def _fast_xlsx_file_rows(path: Path) -> tuple[list[str], Iterator[dict[str, Any]]]:
+    import zipfile
+    from lxml import etree
+
+    zf = zipfile.ZipFile(path)
+    shared: list[str] = []
+    if "xl/sharedStrings.xml" in zf.namelist():
+        tree = etree.fromstring(zf.read("xl/sharedStrings.xml"))
+        ns = {"s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        for si in tree.findall("s:si", ns):
+            t = si.find("s:t", ns)
+            if t is not None:
+                shared.append(t.text or "")
+            else:
+                shared.append("".join(r.findtext("s:t", "", ns) for r in si.findall("s:r", ns)))
+
+    sheet_name = None
+    for name in zf.namelist():
+        if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
+            sheet_name = name
+            break
+    if not sheet_name:
+        zf.close()
+        raise ImportEngineError("EMPTY_FILE", "Workbook tidak mempunyai worksheet.")
+
+    f = zf.open(sheet_name)
+    headers: list[str] | None = None
+    row_iter = etree.iterparse(f, tag="{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row")
+
+    for event, elem in row_iter:
+        cells: list[Any] = [None] * (len(headers) if headers else 30)
+        for c in elem:
+            r = c.get("r")
+            if not r:
+                continue
+            if len(r) >= 2 and "A" <= r[1] <= "Z":
+                if len(r) >= 3 and "A" <= r[2] <= "Z":
+                    ci = (ord(r[0]) - 64) * 676 + (ord(r[1]) - 64) * 26 + (ord(r[2]) - 65)
+                else:
+                    ci = (ord(r[0]) - 64) * 26 + (ord(r[1]) - 65)
+            else:
+                ci = ord(r[0]) - 65
+            if ci >= len(cells):
+                cells.extend([None] * (ci - len(cells) + 1))
+            t = c.get("t")
+            v = None
+            for child in c:
+                if child.tag.endswith("v"):
+                    v = child.text
+                    break
+                elif child.tag.endswith("is"):
+                    v = child.findtext("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t", "")
+                    break
+            if t == "s" and v and v.isdigit() and int(v) < len(shared):
+                val = shared[int(v)]
+            elif t == "b":
+                val = v == "1"
+            else:
+                val = v if v != "" else None
+            cells[ci] = val
+        elem.clear()
+        parent = elem.getparent()
+        if parent is not None:
+            while elem.getprevious() is not None:
+                del parent[0]
+        if headers is None:
+            if any(c is not None and str(c).strip() for c in cells):
+                while cells and cells[-1] is None:
+                    cells.pop()
+                headers = [str(x or "").strip() or f"Kolom{i+1}" for i, x in enumerate(cells)]
+                break
+
+    if not headers:
+        f.close()
+        zf.close()
+        raise ImportEngineError("EMPTY_FILE", "Workbook tidak mempunyai header.")
+
+    def generate() -> Iterator[dict[str, Any]]:
+        nonlocal headers
+        header_len = len(headers)
+        try:
+            for event, elem in row_iter:
+                cells: list[Any] = [None] * header_len
+                has_val = False
+                for c in elem:
+                    r = c.get("r")
+                    if not r:
+                        continue
+                    if len(r) >= 2 and "A" <= r[1] <= "Z":
+                        if len(r) >= 3 and "A" <= r[2] <= "Z":
+                            ci = (ord(r[0]) - 64) * 676 + (ord(r[1]) - 64) * 26 + (ord(r[2]) - 65)
+                        else:
+                            ci = (ord(r[0]) - 64) * 26 + (ord(r[1]) - 65)
+                    else:
+                        ci = ord(r[0]) - 65
+                    if ci < header_len:
+                        t = c.get("t")
+                        v = None
+                        for child in c:
+                            if child.tag.endswith("v"):
+                                v = child.text
+                                break
+                            elif child.tag.endswith("is"):
+                                v = child.findtext("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}t", "")
+                                break
+                        if t == "s" and v and v.isdigit() and int(v) < len(shared):
+                            val = shared[int(v)]
+                        elif t == "b":
+                            val = v == "1"
+                        else:
+                            val = v if v != "" else None
+                        cells[ci] = val
+                        if val is not None and str(val).strip():
+                            has_val = True
+                elem.clear()
+                parent = elem.getparent()
+                if parent is not None:
+                    while elem.getprevious() is not None:
+                        del parent[0]
+                if has_val:
+                    yield {headers[i]: cells[i] for i in range(header_len)}
+        finally:
+            f.close()
+            zf.close()
+
+    return headers, generate()
+
+
 def _file_rows(path: Path, file_type: str) -> tuple[list[str], Iterator[dict[str, Any]]]:
     if file_type in {"csv", "parquet"}:
         scan = "read_csv(?, header=true, auto_detect=true, all_varchar=true, sample_size=-1)" if file_type == "csv" else "read_parquet(?)"
@@ -351,27 +510,31 @@ def _file_rows(path: Path, file_type: str) -> tuple[list[str], Iterator[dict[str
 
         return headers, generate()
     if file_type == "xlsx":
-        from openpyxl import load_workbook
+        try:
+            return _fast_xlsx_file_rows(path)
+        except Exception as exc:
+            _LOGGER.warning("Fast streaming XLSX reader gagal (%s); fallback ke openpyxl.", exc)
+            from openpyxl import load_workbook
 
-        workbook = load_workbook(path, read_only=True, data_only=True)
-        sheet = workbook[workbook.sheetnames[0]]
-        iterator = sheet.iter_rows(values_only=True)
-        first = next(iterator, None)
-        if not first:
-            workbook.close()
-            raise ImportEngineError("EMPTY_FILE", "Workbook tidak mempunyai header.")
-        headers = [str(value or "").strip() or f"Kolom{index + 1}" for index, value in enumerate(first)]
-
-        def generate() -> Iterator[dict[str, Any]]:
-            try:
-                for values in iterator:
-                    row = {name: values[index] if index < len(values) else None for index, name in enumerate(headers)}
-                    if any(value is not None and str(value).strip() for value in row.values()):
-                        yield row
-            finally:
+            workbook = load_workbook(path, read_only=True, data_only=True)
+            sheet = workbook[workbook.sheetnames[0]]
+            iterator = sheet.iter_rows(values_only=True)
+            first = next(iterator, None)
+            if not first:
                 workbook.close()
+                raise ImportEngineError("EMPTY_FILE", "Workbook tidak mempunyai header.")
+            headers = [str(value or "").strip() or f"Kolom{index + 1}" for index, value in enumerate(first)]
 
-        return headers, generate()
+            def generate() -> Iterator[dict[str, Any]]:
+                try:
+                    for values in iterator:
+                        row = {name: values[index] if index < len(values) else None for index, name in enumerate(headers)}
+                        if any(value is not None and str(value).strip() for value in row.values()):
+                            yield row
+                finally:
+                    workbook.close()
+
+            return headers, generate()
     raise ImportEngineError("UNSUPPORTED_FILE", f"Format file tidak didukung: {file_type}")
 
 
@@ -394,8 +557,15 @@ def _canonical_stage_row(
     source_format: str,
 ) -> tuple[Any, ...]:
     normalized = normalize_raw_row(row, headers, mapping, f"imp-{source_row:012d}")
-    values = [row.get(name) for name in headers]
-    get = lambda field: values[mapping[field]] if field in mapping else ""
+    row_json = _json(row)
+    raw_hash = hashlib.sha256(row_json.encode("utf-8")).hexdigest()
+
+    def get(field: str) -> Any:
+        idx = mapping.get(field)
+        if idx is not None and idx < len(headers):
+            return row.get(headers[idx])
+        return ""
+
     nip_raw = str(get("nip") or "").strip()
     date = parse_date(get("tanggal")) or parse_date(get("tanggalPulang"))
     in_raw = get("jamMasuk")
@@ -428,7 +598,7 @@ def _canonical_stage_row(
     severity = "BLOCKER" if errors else ("WARNING" if warnings else "ACCEPTED_LEGACY")
     date_key = date["key"] if date else None
     return (
-        import_id, source_row, _json(row), _raw_hash(row, headers),
+        import_id, source_row, row_json, raw_hash,
         normalized.get("nip") or nip_raw or None,
         normalized.get("nama") or str(get("nama") or "").strip(),
         normalized.get("jabatan") or str(get("jabatan") or "").strip(),
@@ -443,7 +613,8 @@ def _canonical_stage_row(
         normalized.get("kabupaten") or str(get("kabupaten") or "").strip(),
         normalized.get("jenis") or str(get("jenis") or "").strip(),
         source_format, date_key[:7] if date_key else None,
-        bool(normalized.get("crossDay")), False, not errors, severity, _json(issues),
+        bool(normalized.get("crossDay")), False, not errors, severity,
+        "[]" if not issues else _json(issues),
         # Normalized values already have typed columns beside raw_json.  Do not
         # duplicate every row as a second large JSON object.
         None,
@@ -459,11 +630,27 @@ STAGE_COLUMNS = (
 )
 
 
-def _insert_stage_buffer(conn: duckdb.DuckDBPyConnection, buffer: list[tuple[Any, ...]]) -> None:
-    """Bulk insert a bounded Arrow batch instead of row-wise executemany."""
-    import pyarrow as pa
+import pyarrow as pa
 
-    table = pa.Table.from_pylist([dict(zip(STAGE_COLUMNS, row)) for row in buffer])
+STAGE_ARROW_TYPES = [
+    pa.string(), pa.int64(), pa.string(), pa.string(), pa.string(),
+    pa.string(), pa.string(), pa.string(), pa.string(), pa.string(),
+    pa.string(), pa.int32(), pa.int32(), pa.int32(), pa.int32(),
+    pa.int32(), pa.int32(), pa.string(), pa.string(), pa.string(),
+    pa.string(), pa.string(), pa.string(), pa.bool_(), pa.bool_(),
+    pa.bool_(), pa.string(), pa.string(), pa.string(),
+]
+
+
+def _insert_stage_buffer(conn: duckdb.DuckDBPyConnection, buffer: list[tuple[Any, ...]]) -> None:
+    """Bulk insert a bounded Arrow batch using columnar arrays with explicit types."""
+    if not buffer:
+        return
+    cols = [
+        pa.array([row[idx] for row in buffer], type=STAGE_ARROW_TYPES[idx])
+        for idx in range(len(STAGE_COLUMNS))
+    ]
+    table = pa.Table.from_arrays(cols, names=STAGE_COLUMNS)
     conn.register("_absence_import_arrow", table)
     try:
         conn.execute("INSERT INTO absence_import_staging SELECT * FROM _absence_import_arrow")
@@ -1402,17 +1589,27 @@ class AbsenceImportService:
                 buffer: list[tuple[Any, ...]] = []
                 count = 0
                 if source_format == "standard":
+                    estimated_total = _estimate_xlsx_row_count(path) if batch.get("file_type") == "xlsx" else None
+                    if estimated_total and estimated_total > 0:
+                        with self.write_gate:
+                            conn.execute("UPDATE absence_import_batch SET total_rows=? WHERE import_id=?",
+                                         [estimated_total, import_id])
+                    batch_size = 5000
                     for count, row in enumerate(rows, 1):
                         buffer.append(_canonical_stage_row(import_id, count, row, headers, mapping, source_format))
-                        if len(buffer) >= 5000:
+                        if len(buffer) >= batch_size:
                             with self.write_gate:
                                 _insert_stage_buffer(conn, buffer)
-                                conn.execute("UPDATE absence_import_batch SET status='NORMALIZING',staged_rows=?,normalized_rows=?,progress=50,updated_at=now() WHERE import_id=?",
-                                             [count, count, import_id])
+                                progress = min(92.0, round(10.0 + (count / max(1, estimated_total)) * 82.0, 1)) if estimated_total else min(90.0, round(10.0 + (count / (count + 50000)) * 80.0, 1))
+                                conn.execute("UPDATE absence_import_batch SET status='NORMALIZING',staged_rows=?,normalized_rows=?,progress=?,updated_at=now() WHERE import_id=?",
+                                             [count, count, progress, import_id])
                             buffer.clear()
                     if buffer:
                         with self.write_gate:
                             _insert_stage_buffer(conn, buffer)
+                            progress = 92.0 if estimated_total else 90.0
+                            conn.execute("UPDATE absence_import_batch SET status='NORMALIZING',staged_rows=?,normalized_rows=?,progress=?,updated_at=now() WHERE import_id=?",
+                                         [count, count, progress, import_id])
                 with self.write_gate:
                     if source_format != CSV_EABSENSI_SOURCE_FORMAT:
                         conn.execute("""

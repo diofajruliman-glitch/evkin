@@ -7,6 +7,11 @@
   const mod = EVKIN.semifinalMod = {};
   let nipSearch = '';
 
+  mod.loadPage = () => EVKIN.loadWorkflowSource('daily_data', {
+    periode:S.month, page:S.semifinalPage + 1, perPage:10, search:nipSearch, detail:true, cache:false, force:true,
+    filter:({dup:'statusDuplikasi:Duplikasi',tl:'statusLengkap:Tidak Lengkap'})[filter] || ''
+  });
+
   function recomputeDup() {
     const grp = {};
     S.data.filter(d => !d.deleted).forEach(d => { const k = d.nip + '|' + d.tanggal.key; (grp[k] = grp[k] || []).push(d); });
@@ -15,6 +20,7 @@
   }
 
   mod.recalcChain = async function () {
+    if (EVKIN.harianMod?.usesBackend?.()) return EVKIN.harianMod.process();
     if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['processed_data', 'daily_data']);
     if (EVKIN.progress) EVKIN.progress({title: 'Hitung Ulang Semi Final', percent: 0, message: 'Menyiapkan perhitungan ulang...'});
     recomputeDup();
@@ -43,6 +49,7 @@
 
   mod.render = function (el) {
     if (!EVKIN.stepUnlocked('semifinal')) { el.innerHTML = lock('Selesaikan Hitung Harian terlebih dahulu.'); return; }
+    const server = EVKIN.harianMod?.usesBackend?.();
     const c = counts();
 
     // ---- PAGINATION ----
@@ -54,22 +61,23 @@
     else if (filter === 'cuti') d = d.filter(x => x.statusCuti);
     if (nipSearch) d = d.filter(x => String(x.nip || '').toLowerCase().includes(nipSearch));
 
-    const totalPages = Math.ceil(d.length / ITEMS_PER_PAGE);
+    const total = server ? (S.workflowPages.daily_data?.total || 0) : d.length;
+    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
     let currentPage = Math.max(0, Math.min(S.semifinalPage, totalPages - 1));
     S.semifinalPage = currentPage;
 
     const startIdx = currentPage * ITEMS_PER_PAGE;
     const endIdx = startIdx + ITEMS_PER_PAGE;
-    const pageData = d.slice(startIdx, endIdx);
+    const pageData = server ? S.daily : d.slice(startIdx, endIdx);
 
     const rowsHtml = !pageData.length ? '<tr><td colspan="9" class="muted">Tidak ada data untuk filter ini.</td></tr>'
       : pageData.map(x => `<tr class="${x.flags.length ? 'row-flag' : ''}">
         <td>${U.esc(x.nip)}</td><td>${U.esc(x.nama)}</td><td>${U.esc(x.tanggal)}</td><td>${U.esc(x.jamMasuk)}</td><td>${U.esc(x.jamPulang)}</td>
         <td>${U.esc(x.jenis || x.statusCuti)}</td><td class="err small">${U.esc(x.flags.join(', '))}</td><td><b>${x.totalHarian}%</b></td>
-        <td><button class="link-edit" data-edit="${x._id}">Edit</button> · <button class="link-del" data-del="${x._id}">Hapus</button></td></tr>`).join('');
+        <td>${server ? '—' : `<button class="link-edit" data-edit="${x._id}">Edit</button> · <button class="link-del" data-del="${x._id}">Hapus</button>`}</td></tr>`).join('');
 
     const paginationInfo = d.length > 0 ? `<div style="text-align: center; margin: 12px 0; font-size: 13px; color: #666;">
-      <strong>Data ${startIdx + 1}–${Math.min(endIdx, d.length)} dari ${d.length}</strong> |
+      <strong>Data ${startIdx + 1}–${Math.min(endIdx, total)} dari ${total}</strong> |
       <strong>Halaman ${currentPage + 1} dari ${totalPages}</strong>
     </div>` : '';
 
@@ -93,12 +101,13 @@
         ${sc('Absensi Tidak Lengkap', c.tl, 'file-warning', c.tl ? 'yellow' : 'green')}
         ${sc('Absensi Hari Libur', c.libur, 'moon', 'gray')}
         ${sc('Status Cuti/Bebas', c.cuti, 'plane', 'blue')}
-        ${sc('Total Record', c.total, 'list', 'blue')}
+        ${sc(server ? 'Baris halaman ini' : 'Total Record', c.total, 'list', 'blue')}
       </div>
       <div class="card">
+        ${server ? '<p class="muted">Ringkasan untuk halaman ini. Untuk koreksi data, perbarui workbook sumber lalu impor ulang.</p>' : ''}
         <div class="filter-bar">
           <input type="search" id="semifinalNipSearch" placeholder="Cari NIP..." value="${U.esc(nipSearch)}" data-testid="semifinal-nip-search" />
-          ${fbtn('all', 'Semua')} ${fbtn('dup', 'Duplikasi')} ${fbtn('tl', 'Tidak Lengkap')} ${fbtn('libur', 'Hari Libur')} ${fbtn('cuti', 'Cuti')}
+          ${fbtn('all', 'Semua')} ${fbtn('dup', 'Duplikasi')} ${fbtn('tl', 'Tidak Lengkap')} ${server ? '' : fbtn('libur', 'Hari Libur') + fbtn('cuti', 'Cuti')}
         </div>
         <div class="table-wrap"><table class="data-table sm" data-testid="semifinal-table"><thead><tr>
           <th>NIP</th><th>Nama</th><th>Tgl</th><th>Masuk</th><th>Pulang</th><th>Jenis</th><th>Flag</th><th>Total</th><th>Aksi</th></tr></thead>
@@ -113,7 +122,7 @@
       </div>`;
 
     el.querySelectorAll('[data-filter]').forEach(b => b.onclick = () => { filter = b.dataset.filter; S.semifinalPage = 0; EVKIN.go('semifinal'); });
-    el.querySelector('#semifinalNipSearch').oninput = (event) => { nipSearch = event.target.value.trim().toLowerCase(); S.semifinalPage = 0; EVKIN.go('semifinal'); };
+    el.querySelector('#semifinalNipSearch')[server ? 'onchange' : 'oninput'] = (event) => { nipSearch = event.target.value.trim().toLowerCase(); S.semifinalPage = 0; EVKIN.go('semifinal'); };
     el.querySelector('#recalc').onclick = async () => {
       const button = el.querySelector('#recalc');
       button.disabled = true;
@@ -136,6 +145,13 @@
       const previous = S.semifinalVerified;
       const previousRows = S.semifinal;
       try {
+        if (server) {
+          await EVKIN.exportBackend.markSemifinalVerified({bulan:S.month, timeoutMs:60000});
+          S.semifinalVerified = true;
+          EVKIN.toast('Semi Final terverifikasi dan tersimpan');
+          EVKIN.go('rekap');
+          return;
+        }
         if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['processed_data', 'daily_data']);
         EVKIN.assertDailyCoverage();
         const seen = new Set();
@@ -222,7 +238,7 @@
     return d.slice(0, 300).map(x => `<tr class="${x.flags.length ? 'row-flag' : ''}">
       <td>${U.esc(x.nip)}</td><td>${U.esc(x.nama)}</td><td>${U.esc(x.tanggal)}</td><td>${U.esc(x.jamMasuk)}</td><td>${U.esc(x.jamPulang)}</td>
       <td>${U.esc(x.jenis || x.statusCuti)}</td><td class="err small">${U.esc(x.flags.join(', '))}</td><td><b>${x.totalHarian}%</b></td>
-      <td><button class="link-edit" data-edit="${x._id}">Edit</button> · <button class="link-del" data-del="${x._id}">Hapus</button></td></tr>`).join('');
+      <td>${server ? '—' : `<button class="link-edit" data-edit="${x._id}">Edit</button> · <button class="link-del" data-del="${x._id}">Hapus</button>`}</td></tr>`).join('');
   }
 
   async function delRec(id) {

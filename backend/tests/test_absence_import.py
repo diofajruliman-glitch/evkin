@@ -645,6 +645,18 @@ def test_malformed_time_blocks_but_legacy_missing_punch_remains_warning(service)
     assert "MISSING_CHECK_IN" in by_nip["MISSING"]["error_codes"]
 
 
+def test_missing_checkout_alone_does_not_require_confirmation(eabs_service):
+    headers = EABS_HEADERS + ["NM_JABATAN"]
+    batch = upload_eabs(eabs_service, [
+        eabs_row("SHIFT01", "2026-08-03", "2026-08-03 20:00", "", NM_JABATAN="Wali Asuh"),
+    ], headers=headers)
+    assert batch["invalid_rows"] == 0
+    warning, = eabs_service.preview(batch["import_id"], errors_only=True)["rows"]
+    assert warning["severity"] == "WARNING"
+    assert warning["error_codes"] == ["MISSING_CHECK_OUT"]
+    assert eabs_service.commit(batch["import_id"])["status"] == "COMMITTED"
+
+
 def test_duplicate_key_is_flagged_not_silently_appended(service):
     batch = upload(service, csv_bytes([row("1"), row("1", masuk="08:00")]))
     assert batch["duplicate_rows"] == 2

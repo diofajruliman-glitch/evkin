@@ -147,3 +147,20 @@ def test_real_world_raw_import_normalization_preserves_legacy_aliases_and_cross_
     assert normalized[0]["pulangMin"] == 4 * 60
     assert normalized[0]["crossDay"] is True
     assert normalized[0]["issues"] == []
+
+def test_wali_asuh_missing_punch_is_only_assessed_against_monthly_workday_target():
+    config = load_json(FIXTURE)["config"]
+    config.update(effectiveDaysMode="manual", effectiveDaysManual=2)
+    context = build_context(config)
+    def day(date, check_in, check_out):
+        return compute_record({"nip": "001", "jabatan": "Wali Asuh", "tanggal": parse_date(date),
+                               "masukMin": check_in, "pulangMin": check_out, "zona": "WIB"},
+                              context, "original")
+    rows = [day("2026-09-01", 480, None), day("2026-09-06", None, 360), day("2026-09-02", None, None)]
+    assert rows[0]["statusLengkap"] == "Tidak Lengkap"
+    assert all(row["totalHarian"] == 0 for row in rows)
+    result = compute_rekap(rows, context)
+    assert (result["hariAdaAbsensi"], result["hariKurang"], result["total"]) == (2, 0, 0)
+    config["effectiveDaysManual"] = 3
+    result = compute_rekap(rows, context)
+    assert (result["hariAdaAbsensi"], result["hariKurang"], result["total"]) == (2, 1, 3)

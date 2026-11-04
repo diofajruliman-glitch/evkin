@@ -196,6 +196,7 @@
   };
 
   mod.process = function () {
+    if (EVKIN.harianMod?.usesBackend?.()) return S.final;
     if (!S.rekap.length) throw new Error('Rekap belum tersedia.');
     S.final = S.rekap.filter(r => !r.bulan || r.bulan === S.month).map(r => {
       const master = masterTukinOf(r.nip);
@@ -447,6 +448,46 @@
 
   // ---- FINAL + SKP ----
   function skpRow(nip) { let r = S.finalSKP.rows.find(x => x.nip === nip); if (!r) { r = { nip, skpPct: 0 }; S.finalSKP.rows.push(r); } return r; }
+  mod.optionalRows = function (source, rows) {
+    const K = S.finalKombinasi || {}, FC = S.finalCombinedSKP || {};
+    const index = values => new Map((values || []).map(row => [String(row.nip), row]));
+    const skp = index(S.finalSKP?.rows), kombinasi = index(K.rows), combined = index(FC.combinedRows);
+    const combinedSkp = index(FC.skpRows), eabsensi = index(FC.eabsensiRows), esdm = index(FC.esdmRows);
+    return rows.map(f => {
+      const nip = String(f.nip);
+      if (source === 'final_skp') {
+        const skpPct = Number(skp.get(nip)?.skpPct) || 0;
+        const nominalSKP = roundMoney(roundMoney(f.tukin * KINERJA) * (Math.min(100, skpPct) / 100));
+        return {...f, skpPct, nominalSKP, finalDibayarSKP:roundMoney(f.tukin - f.nominal - nominalSKP)};
+      }
+      if (source === 'final_kombinasi') {
+        const input = kombinasi.get(nip) || {};
+        const eabsensiPct = Number(input.eabs) || 0, esdmPct = Number(input.esdm) || 0;
+        const candidates = [];
+        if (K.useApp) candidates.push(f.potPct);
+        if (K.useEabsensi) candidates.push(eabsensiPct);
+        if (K.useEsdm) candidates.push(esdmPct);
+        const potonganTerpilihPct = candidates.length ? Math.min(...candidates) : 0;
+        const nominalKombinasi = roundMoney(f.komponen * (Math.min(100, potonganTerpilihPct) / 100));
+        return {...f, aplikasiPct:f.potPct, eabsensiPct, esdmPct, potonganTerpilihPct,
+          nominalKombinasi, finalDibayarKombinasi:roundMoney(f.tukin - nominalKombinasi)};
+      }
+      const candidates = [];
+      if (FC.useApp) candidates.push(f.potPct);
+      if (FC.useEabsensi && eabsensi.has(nip)) candidates.push(eabsensi.get(nip).pct);
+      if (FC.useEsdm && esdm.has(nip)) candidates.push(esdm.get(nip).pct);
+      const potonganAbsensiPct = candidates.length ? Math.min(...candidates) : f.potPct;
+      const skpInput = combinedSkp.get(nip);
+      const potonganSKPPct = Number(skpInput?.skpPct ?? skpInput?.pct ?? combined.get(nip)?.skpPct) || 0;
+      const nominalPotonganAbsensi = roundMoney(f.tukin * KEHADIRAN * (Math.min(100, potonganAbsensiPct) / 100));
+      const nominalPotonganSKP = roundMoney(f.tukin * KINERJA * (Math.min(100, potonganSKPPct) / 100));
+      const totalNominalPotongan = roundMoney(nominalPotonganAbsensi + nominalPotonganSKP);
+      return {...f, potonganAbsensiPct, nominalPotonganAbsensi, potonganSKPPct, nominalPotonganSKP,
+        totalPotonganPct:Math.round((potonganAbsensiPct * KEHADIRAN + potonganSKPPct * KINERJA) * 100) / 100,
+        totalNominalPotongan, finalDibayarKombinasiSKP:roundMoney(f.tukin - totalNominalPotongan)};
+    });
+  };
+
   function skpView() {
     const ITEMS_PER_PAGE = 10;
     const data = filteredFinal();
@@ -458,11 +499,8 @@
     const endIdx = startIdx + ITEMS_PER_PAGE;
     const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map((f, rowIndex) => {
-      const sr = skpRow(f.nip);
-      const komKinerja = roundMoney(f.tukin * KINERJA);
-      const nomSKP = roundMoney(komKinerja * (Math.min(100, sr.skpPct) / 100));
-      const finalTotal = roundMoney(f.tukin - f.nominal - nomSKP);
+    const rows = mod.optionalRows('final_skp', pageData).map((f, rowIndex) => {
+      const {nominalSKP:nomSKP, finalDibayarSKP:finalTotal} = f;
       return `<tr><td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td><td>${U.fmtRupiah(f.tukin)}</td>
         <td>${U.fmtRupiah(f.nominal)}</td>
         <td><input type="number" step="0.1" class="cell-num" data-final-skp-row="${startIdx + rowIndex}" ${S.finalSKP.enabled ? '' : 'disabled'} data-testid="skp-pct-input"/></td>
@@ -567,15 +605,8 @@
     const endIdx = startIdx + ITEMS_PER_PAGE;
     const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map((f, rowIndex) => {
-      const kr = kombRow(f.nip);
-      const cand = [];
-      if (K.useApp) cand.push(f.potPct);
-      if (K.useEabsensi) cand.push(kr.eabs);
-      if (K.useEsdm) cand.push(kr.esdm);
-      const minPct = cand.length ? Math.min(...cand) : 0;
-      const nominal = roundMoney(f.komponen * (Math.min(100, minPct) / 100));
-      const finalPay = roundMoney(f.tukin - nominal);
+    const rows = mod.optionalRows('final_kombinasi', pageData).map((f, rowIndex) => {
+      const {potonganTerpilihPct:minPct, nominalKombinasi:nominal, finalDibayarKombinasi:finalPay} = f;
       return `<tr><td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td><td>${f.potPct}%</td>
         <td><input type="number" step="0.1" class="cell-num" data-kf="eabs" data-final-komb-row="${startIdx + rowIndex}" ${K.useEabsensi ? '' : 'disabled'}/></td>
         <td><input type="number" step="0.1" class="cell-num" data-kf="esdm" data-final-komb-row="${startIdx + rowIndex}" ${K.useEsdm ? '' : 'disabled'}/></td>
@@ -697,15 +728,6 @@
   function lock(m) { return `<div class="module-head"><h2>⑥ Final <span class="pill gray">🔒 Terkunci</span></h2></div><div class="alert warn">${m}</div>`; }
 
   // ---- FINAL + SKP KOMBINASI (TAB BARU) ----
-  function combinedRow(nip) {
-    let r = S.finalCombinedSKP.combinedRows.find(x => x.nip === nip);
-    if (!r) {
-      r = { nip, skpPct: 0, absensiPct: 0 };
-      S.finalCombinedSKP.combinedRows.push(r);
-    }
-    return r;
-  }
-
   function combinedView() {
     const ITEMS_PER_PAGE = 10;
     const FC = S.finalCombinedSKP;
@@ -716,37 +738,12 @@
 
     const startIdx = currentPage * ITEMS_PER_PAGE;
     const endIdx = startIdx + ITEMS_PER_PAGE;
-    const pageData = data.slice(startIdx, endIdx);
 
-    const rows = pageData.map(f => {
-      const cr = combinedRow(f.nip);
-      const komKehadiran = f.tukin * KEHADIRAN;
-      const komKinerja = f.tukin * KINERJA;
-
-      // Potongan Absensi (30%) - ambil terkecil dari sumber yang dipilih
-      const absensiCand = [];
-      if (FC.useApp) absensiCand.push(f.potPct);
-      if (FC.useEabsensi) {
-        const eabsRow = S.finalCombinedSKP.eabsensiRows.find(x => x.nip === f.nip);
-        if (eabsRow) absensiCand.push(eabsRow.pct);
-      }
-      if (FC.useEsdm) {
-        const esdmRow = S.finalCombinedSKP.esdmRows.find(x => x.nip === f.nip);
-        if (esdmRow) absensiCand.push(esdmRow.pct);
-      }
-
-      const finalAbsensiPct = absensiCand.length ? Math.min(...absensiCand) : f.potPct;
-      const nomAbsensi = roundMoney(komKehadiran * (Math.min(100, finalAbsensiPct) / 100));
-
-      // Potongan SKP (70%)
-      const skpPct = cr.skpPct;
-      const nomSKP = roundMoney(komKinerja * (Math.min(100, skpPct) / 100));
-
-      // Total Potongan
-      const totalPotPct = Math.round((finalAbsensiPct * 0.30 + skpPct * 0.70) * 100) / 100;
-      const totalNominal = roundMoney(nomAbsensi + nomSKP);
-      const tukinDibayar = roundMoney(f.tukin - totalNominal);
-
+    const computed = mod.optionalRows('final_combined_skp', data);
+    const rows = computed.slice(startIdx, endIdx).map(f => {
+      const {potonganAbsensiPct:finalAbsensiPct, nominalPotonganAbsensi:nomAbsensi,
+        potonganSKPPct:skpPct, nominalPotonganSKP:nomSKP, totalPotonganPct:totalPotPct,
+        totalNominalPotongan:totalNominal, finalDibayarKombinasiSKP:tukinDibayar} = f;
       return `<tr>
         <td>${U.esc(f.nip)}</td><td>${U.esc(f.nama)}</td>
         <td>${U.fmtRupiah(f.tukin)}</td>
@@ -757,29 +754,10 @@
       </tr>`;
     }).join('');
 
-    const totBruto = data.reduce((a, f) => a + f.tukin, 0);
-    const totAbsensi = roundMoney(pageData.reduce((a, f) => {
-      const cr = combinedRow(f.nip);
-      const komKehadiran = roundMoney(f.tukin * KEHADIRAN);
-      const absensiCand = [];
-      if (FC.useApp) absensiCand.push(f.potPct);
-      if (FC.useEabsensi) {
-        const eabsRow = S.finalCombinedSKP.eabsensiRows.find(x => x.nip === f.nip);
-        if (eabsRow) absensiCand.push(eabsRow.pct);
-      }
-      if (FC.useEsdm) {
-        const esdmRow = S.finalCombinedSKP.esdmRows.find(x => x.nip === f.nip);
-        if (esdmRow) absensiCand.push(esdmRow.pct);
-      }
-      const finalAbsensiPct = absensiCand.length ? Math.min(...absensiCand) : f.potPct;
-      return a + (komKehadiran * (Math.min(100, finalAbsensiPct) / 100));
-    }, 0));
-    const totSKP = roundMoney(pageData.reduce((a, f) => {
-      const cr = combinedRow(f.nip);
-      return a + (f.tukin * KINERJA * (Math.min(100, cr.skpPct) / 100));
-    }, 0));
-    const totPotongan = roundMoney(totAbsensi + totSKP);
-    const totDibayar = roundMoney(totBruto - totPotongan);
+    const sum = field => computed.reduce((total, row) => total + row[field], 0);
+    const totBruto = sum('tukin'), totAbsensi = sum('nominalPotonganAbsensi'),
+      totSKP = sum('nominalPotonganSKP'), totPotongan = sum('totalNominalPotongan'),
+      totDibayar = sum('finalDibayarKombinasiSKP');
 
     const paginationInfo = `<div style="text-align: center; margin: 12px 0; font-size: 13px; color: #666;">
       <strong>Data ${startIdx + 1}–${Math.min(endIdx, data.length)} dari ${data.length}</strong> |

@@ -5,15 +5,35 @@
   const mod = EVKIN.rekapMod = {};
   let nipSearch = '';
   let pageSize = 50, monthFilter = '';
+  mod.loadPage = () => EVKIN.loadWorkflowSource('rekap_sdm', {
+    periode:S.month, page:S.rekapPage + 1, perPage:pageSize, search:nipSearch, detail:true, cache:false, force:true
+  });
   function coverageView() {
+    if (EVKIN.harianMod?.usesBackend?.()) return `<div class="alert info">Periode ${U.monthLabel(S.month)} · ${S.workflowPages.rekap_sdm?.total || 0} SDM sesuai filter.</div>`;
     const count = S.rekap.reduce((sum,row) => sum + Number(row.jumlahRecord || 0),0);
     return `<div class="alert info">Harian seluruh bulan: <b>${S.daily.length}</b> record · Direkap: <b>${count}</b> record → <b>${S.rekap.length}</b> baris NIP/bulan · <b>${new Set(S.rekap.map(r => r.nip)).size}</b> SDM unik.</div>`;
   }
 
   mod.process = async function (options = {}) {
+    if (!S.semifinalVerified) throw new Error('Verifikasi Semi Final sebelum memproses Rekap SDM.');
+    const canUseBackend = EVKIN.exportBackend && EVKIN.exportBackend.enabled &&
+      (EVKIN.exportBackend.calculationAuthority === 'PYTHON_CANONICAL' ||
+       (typeof localStorage !== 'undefined' && localStorage.getItem('evkin.absenceAuthority') === 'PYTHON_CANONICAL')) &&
+      S.month && typeof EVKIN.exportBackend.runCanonicalAbsenceCalculation === 'function';
+    if (canUseBackend) {
+      if (EVKIN.progress) EVKIN.progress({title: 'Rekap SDM', percent: 20, message: 'Menghitung Rekap di backend DuckDB...'});
+      const canonical = await EVKIN.exportBackend.runCanonicalAbsenceCalculation(
+        S.month, 'Operator', 'Hitung Ulang Rekap SDM', {hydrate:false}
+      );
+      await mod.loadPage();
+      S.workflowLoaded = {};
+      S.workflowMeta.row_counts.rekap_sdm = canonical.batch.counts.rekap;
+      S.workflowMeta.row_counts.final_absensi = canonical.batch.counts.final;
+      if (EVKIN.progress) EVKIN.progress({title: 'Rekap SDM', percent: 100, message: `Rekap ${S.rekap.length} SDM selesai.`, state: 'done'});
+      return S.rekap;
+    }
     if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['daily_data']);
     if (!S.daily.length) throw new Error('Belum ada hasil Hitung Harian.');
-    if (!S.semifinalVerified) throw new Error('Verifikasi Semi Final sebelum memproses Rekap SDM.');
     const ctx = C.buildContext();
     if (S.data && S.data.length && EVKIN.assertDailyCoverage) EVKIN.assertDailyCoverage();
     const byNip = {};
@@ -143,7 +163,8 @@
 
   mod.render = function (el) {
     if (!EVKIN.stepUnlocked('rekap')) { el.innerHTML = lock('Verifikasi Semi Final terlebih dahulu.', '⑤ Rekap SDM'); return; }
-    const canProcess = S.semifinalVerified && S.daily.length > 0 && S.dailyComplete !== false;
+    const server = EVKIN.harianMod?.usesBackend?.();
+    const canProcess = S.semifinalVerified && (server || (S.daily.length > 0 && S.dailyComplete !== false));
     const expected = (S.data || []).filter(row => !row.deleted && row.tanggal && row.nip).length;
     const guidance = canProcess ? '' : `<div class="alert warn" role="status">Rekap SDM tetap dapat dibuka untuk ditinjau. ${S.dailyComplete === false || S.daily.length !== expected
       ? `Harian belum lengkap: ${S.daily.length} dari ${expected} record impor aktif. Jalankan Hitung Semua Data Impor, lalu verifikasi Semi Final.`
@@ -155,7 +176,7 @@
       if (daily) daily.onclick = () => EVKIN.go('harian');
       if (verify) verify.onclick = () => EVKIN.go('semifinal');
     };
-    if (!S.rekap.length) {
+    if (!S.rekap.length && !(server && nipSearch)) {
       el.innerHTML = `<div class="module-head"><h2>⑤ Rekap SDM</h2></div>
         ${guidance}
         <div class="card"><div class="alert info">${canProcess ? S.daily.length + ' record Harian terverifikasi siap direkap untuk seluruh bulan.' : 'Belum ada hasil Rekap SDM yang valid.'} Setiap NIP menghasilkan satu baris per bulan.</div>
@@ -173,14 +194,15 @@
 
     // ---- PAGINATION ----
     const ITEMS_PER_PAGE = pageSize;
-    const r = S.rekap.filter(x => (!monthFilter || x.bulan === monthFilter) && (!nipSearch || [x.nip,x.nama,x.jabatan].some(v => String(v || '').toLowerCase().includes(nipSearch))));
-    const totalPages = Math.max(1, Math.ceil(r.length / ITEMS_PER_PAGE));
+    const r = server ? S.rekap : S.rekap.filter(x => (!monthFilter || x.bulan === monthFilter) && (!nipSearch || [x.nip,x.nama,x.jabatan].some(v => String(v || '').toLowerCase().includes(nipSearch))));
+    const total = server ? (S.workflowPages.rekap_sdm?.total || 0) : r.length;
+    const totalPages = Math.max(1, Math.ceil(total / ITEMS_PER_PAGE));
     let currentPage = Math.max(0, Math.min(S.rekapPage, totalPages - 1));
     S.rekapPage = currentPage;
 
     const startIdx = currentPage * ITEMS_PER_PAGE;
     const endIdx = startIdx + ITEMS_PER_PAGE;
-    const pageData = r.slice(startIdx, endIdx);
+    const pageData = server ? r : r.slice(startIdx, endIdx);
 
     const head = ['NIP', 'Nama', 'Jabatan', 'Bulan', 'Record Sumber', 'Hari Efektif', 'Hari Absensi', 'Hari Kurang', 'Jml Hari Absen', 'Terlambat %', 'Plg Cepat %', 'Durasi %', 'Hari Kurang %', 'Tdk Rekam %', 'Total Potongan %', 'Status'];
     const rows = pageData.map(x => `<tr class="${x.dupDates ? 'row-flag' : ''}">
@@ -191,7 +213,7 @@
       <td><span class="pill ${statusColor(x.status)}">${U.esc(x.status)}</span></td></tr>`).join('') || '<tr><td colspan="16" class="muted">Tidak ada SDM yang sesuai pencarian/filter.</td></tr>';
 
     const paginationInfo = `<div style="text-align: center; margin: 16px 0; font-size: 13px; color: #666;">
-      <strong>Data ${r.length ? startIdx + 1 : 0}–${Math.min(endIdx, r.length)} dari ${r.length} SDM</strong> |
+      <strong>Data ${r.length ? startIdx + 1 : 0}–${Math.min(endIdx, total)} dari ${total} SDM</strong> |
       <strong>Halaman ${currentPage + 1} dari ${totalPages}</strong>
     </div>`;
 
@@ -204,11 +226,11 @@
       </button>
     </div>`;
 
-    el.innerHTML = `<div class="module-head"><div><h2>⑤ Rekap SDM</h2><p class="muted">Seluruh bulan impor; 1 NIP = 1 baris per bulan.</p></div>
+    el.innerHTML = `<div class="module-head"><div><h2>⑤ Rekap SDM</h2><p class="muted">${server ? U.monthLabel(S.month) : 'Seluruh bulan impor'}; 1 NIP = 1 baris per bulan.</p></div>
       <button class="btn btn-secondary" id="btnRekap2" data-testid="rekap-rerun" ${canProcess ? '' : 'disabled'}><i data-lucide="refresh-cw"></i> Hitung Ulang</button></div>
       ${guidance}
       ${coverageView()}
-      <div class="card"><div class="filter-bar"><select id="rekapMonthFilter"><option value="">Semua bulan</option>${[...new Set(S.rekap.map(r => r.bulan))].sort().map(m => `<option value="${m}" ${monthFilter === m ? 'selected' : ''}>${U.monthLabel(m)}</option>`).join('')}</select><select id="rekapPageSize">${[25,50,100,250].map(n => `<option value="${n}" ${pageSize === n ? 'selected' : ''}>${n} baris</option>`).join('')}</select><input type="search" id="rekapNipSearch" placeholder="Cari NIP, nama, jabatan..." value="${U.esc(nipSearch)}" data-testid="rekap-nip-search" /></div><div class="table-wrap"><table class="data-table sm" data-testid="rekap-table"><thead><tr>${head.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="card"><div class="filter-bar"><select id="rekapMonthFilter">${server ? '' : '<option value="">Semua bulan</option>'}${(server ? (S.importStats?.months || [S.month]) : [...new Set(S.rekap.map(r => r.bulan))]).sort().map(m => `<option value="${m}" ${(server ? S.month : monthFilter) === m ? 'selected' : ''}>${U.monthLabel(m)}</option>`).join('')}</select><select id="rekapPageSize">${[25,50,100,250].map(n => `<option value="${n}" ${pageSize === n ? 'selected' : ''}>${n} baris</option>`).join('')}</select><input type="search" id="rekapNipSearch" placeholder="Cari NIP, nama, jabatan..." value="${U.esc(nipSearch)}" data-testid="rekap-nip-search" /></div><div class="table-wrap"><table class="data-table sm" data-testid="rekap-table"><thead><tr>${head.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>${rows}</tbody></table></div>
       ${paginationInfo}
       ${paginationButtons}
       <div class="actions-row"><button class="btn btn-ghost" onclick="EVKIN.go('semifinal')"><i data-lucide="arrow-left"></i> Kembali</button>
@@ -229,10 +251,11 @@
     if (btnTukin) btnTukin.onclick = () => { if (monthFilter) S.month = monthFilter; EVKIN.go('tukin-annual'); };
     const btnFinal = el.querySelector('#rekapToFinal');
     if (btnFinal) btnFinal.onclick = () => { if (monthFilter) S.month = monthFilter; EVKIN.go('final'); };
-    el.querySelector('#rekapMonthFilter').onchange = e => {monthFilter=e.target.value; S.rekapPage=0; EVKIN.go('rekap');};
+    el.querySelector('#rekapMonthFilter').onchange = e => {monthFilter=e.target.value; if (server) S.month = monthFilter; S.rekapPage=0; EVKIN.go('rekap');};
     el.querySelector('#rekapPageSize').onchange = e => {pageSize=Number(e.target.value); S.rekapPage=0; EVKIN.go('rekap');};
-    el.querySelector('#rekapNipSearch').oninput = (e) => {
+    el.querySelector('#rekapNipSearch')[server ? 'onchange' : 'oninput'] = (e) => {
       nipSearch = e.target.value.toLowerCase(); S.rekapPage = 0;
+      if (server) { EVKIN.go('rekap'); return; }
       mod.render(el);
       const input = el.querySelector('#rekapNipSearch');
       input.focus(); input.setSelectionRange(input.value.length, input.value.length);

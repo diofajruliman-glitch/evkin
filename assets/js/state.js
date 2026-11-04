@@ -220,7 +220,7 @@
     if (source === 'config') {
       const detail = list[0] || {};
       const workflow = detail._workflow || {};
-      if (Number(state.workflowMeta.total_row_counts.final_absensi || 0) > 0) {
+      if (workflowCount('final_absensi') > 0) {
         if (workflow.finalSKP) state.finalSKP = {...state.finalSKP, ...workflow.finalSKP};
         if (workflow.finalKombinasi) state.finalKombinasi = {...state.finalKombinasi, ...workflow.finalKombinasi};
         if (workflow.finalCombinedSKP) state.finalCombinedSKP = {...state.finalCombinedSKP, ...workflow.finalCombinedSKP};
@@ -247,8 +247,8 @@
     const search = String(options.search || '');
     const filter = String(options.filter || '');
     const sort = String(options.sort || '');
-    const cacheKey = `${source}:${all ? 'all' : requestedPage}:${options.periode || ''}:${search}:${filter}:${sort}`;
-    if (!options.force && state.workflowLoaded[cacheKey]) return state.workflowLoaded[cacheKey];
+    const cacheKey = `${source}:${all ? 'all' : requestedPage}:${options.periode || ''}:${search}:${filter}:${sort}:${!!options.detail}`;
+    if (options.cache !== false && !options.force && state.workflowLoaded[cacheKey]) return state.workflowLoaded[cacheKey];
     const loadPromise = (async () => {
       const perPage = all ? 1000 : Math.min(100, Number(options.perPage) || 100);
       let page = all ? 1 : requestedPage, totalPages = 1;
@@ -258,7 +258,7 @@
         url.searchParams.set('page', String(page));
         url.searchParams.set('per_page', String(perPage));
         url.searchParams.set('workflow_id', state.workflowMeta.workflow_id || 'default');
-        if (all) url.searchParams.set('include_detail', 'true');
+        if (all || options.detail) url.searchParams.set('include_detail', 'true');
         if (search) url.searchParams.set('search', search);
         if (filter) url.searchParams.set('filter', filter);
         if (sort) url.searchParams.set('sort', sort);
@@ -279,7 +279,7 @@
       assignWorkflowRows(source, rows);
       return rows;
     })();
-    state.workflowLoaded[cacheKey] = loadPromise;
+    if (options.cache !== false) state.workflowLoaded[cacheKey] = loadPromise;
     try { return await loadPromise; }
     catch (error) { delete state.workflowLoaded[cacheKey]; throw error; }
   };
@@ -346,6 +346,20 @@
   };
 
   EVKIN.ensureWorkflowDataForModule = async function (moduleId) {
+    if (moduleId === 'harian' && EVKIN.harianMod?.usesBackend?.()) {
+      await EVKIN.harianMod.loadPage();
+      return;
+    }
+    if (EVKIN.harianMod?.usesBackend?.() && ['semifinal','rekap','final','export'].includes(moduleId)) {
+      if (moduleId === 'semifinal') return EVKIN.semifinalMod.loadPage();
+      if (moduleId === 'rekap') return EVKIN.rekapMod.loadPage();
+      const sources = {final:['rekap_sdm','final_absensi','config'],
+        export:['final_absensi','config']}[moduleId];
+      for (const source of sources) await EVKIN.loadWorkflowSource(source, {
+        all:moduleId === 'final', detail:source === 'daily_data', periode:state.month, force:true
+      });
+      return;
+    }
     const requirements = {
       import: [['raw_import', false]],
       harian: [['daily_data', false]],
@@ -358,7 +372,7 @@
     for (const [source, all] of requirements[moduleId] || []) {
       await EVKIN.loadWorkflowSource(source, {all});
     }
-    if (moduleId === 'config' && state.importMode === 'csv_eabsensi') {
+    if (moduleId === 'config' && state.importMode === 'csv_eabsensi' && !EVKIN.harianMod?.usesBackend?.()) {
       await EVKIN.ensureWorkflowDataForComputation(['processed_data']);
     }
     // Full raw hydration is reserved for the calculation action. Merely opening
@@ -411,6 +425,9 @@
         }
         EVKIN.exportBackend.staleNoticeShown = false;
       }
+      if (['JS_LEGACY','PYTHON_SHADOW','PYTHON_CANONICAL'].includes(result.calculation_authority)) {
+        EVKIN.exportBackend.calculationAuthority = result.calculation_authority;
+      }
       const data = result && result.data ? result.data : {};
       const meta = result && result.meta ? result.meta : {};
 
@@ -456,7 +473,8 @@
         }
       }
       state.dailyComplete = Number(totals.daily_data || 0) > 0 &&
-        Number(totals.daily_data || 0) === Number(state.importStats.totalRecord || 0);
+        (EVKIN.exportBackend.calculationAuthority === 'PYTHON_CANONICAL' ||
+         Number(totals.daily_data || 0) === Number(state.importStats.totalRecord || 0));
       const hasFinal = Number(totals.final_absensi || 0) > 0;
       state.finalSKP = { enabled: false, rows: [], ...(hasFinal ? workflow.finalSKP : {}) };
       state.finalSKP.rows = [];

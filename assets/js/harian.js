@@ -18,7 +18,7 @@
     const active = !!mod.processing;
     const state = p ? p.state : 'idle';
     const label = !p ? 'Siap menghitung' : state === 'done' ? 'Hitung Harian selesai' : state === 'error' ? 'Hitung Harian gagal' : stages[p.stage];
-    const message = !p ? 'Klik Hitung Semua Data Impor untuk memulai. Status proses akan tampil di sini.' : p.message;
+    const message = !p ? `Klik ${runLabel()} untuk memulai. Status proses akan tampil di sini.` : p.message;
     const percentage = p && p.total ? Math.round(p.done / p.total * 100) : 0;
     return `<div class="harian-process ${state}" data-testid="harian-process" aria-busy="${active}">
       <div class="harian-process-head"><strong role="status" aria-live="polite">${active ? '<span class="harian-spinner" aria-hidden="true"></span>' : ''}${U.esc(label)}</strong><span class="pill ${state === 'error' ? 'red' : state === 'done' ? 'green' : active ? 'blue' : 'gray'}">${active ? 'Sedang berjalan' : state === 'done' ? 'Selesai' : state === 'error' ? 'Gagal' : 'Siap'}</span></div>
@@ -38,7 +38,7 @@
     const button = statusRoot.querySelector('#btnHitung');
     if (button) {
       button.disabled = !!mod.processing;
-      button.textContent = mod.processing ? stages[mod.processStatus.stage] + '...' : 'Hitung Semua Data Impor';
+      button.textContent = mod.processing ? stages[mod.processStatus.stage] + '...' : runLabel();
     }
     for (const id of ['#hMonth', '#hMode']) {
       const select = statusRoot.querySelector(id);
@@ -59,16 +59,47 @@
     if (mod.processing && typeof setTimeout === 'function') statusTimer = setTimeout(tickStatus, 1000);
   }
 
+  mod.usesBackend = () => EVKIN.exportBackend?.enabled &&
+    EVKIN.exportBackend.calculationAuthority === 'PYTHON_CANONICAL';
+  mod.loadPage = (force = true) => EVKIN.loadWorkflowSource('daily_data', {
+    page:S.harianPage + 1, perPage:10, periode:S.month || undefined, search:nipSearch, detail:true, cache:false, force
+  });
+  const runLabel = () => mod.usesBackend() ? 'Hitung Periode Aktif' : 'Hitung Semua Data Impor';
+
   mod.process = async function (options = {}) {
     if (mod.processing) throw new Error('Hitung Harian masih berjalan. Tunggu sampai selesai.');
     mod.processing = true;
     mod.processStatus = {stage:0, state:'active', startedAt:Date.now(), done:0, total:0,
-      message:'Memuat seluruh data impor untuk perhitungan. Mohon tunggu.'};
+      message:mod.usesBackend() ? 'Menyiapkan periode aktif.' : 'Memuat seluruh data impor untuk perhitungan. Mohon tunggu.'};
     refreshStatus();
     tickStatus();
     try {
     if (EVKIN.progress) EVKIN.progress({title:'Hitung Harian', percent:0, message:mod.processStatus.message});
     if (typeof setTimeout === 'function') await new Promise(resolve => setTimeout(resolve, 0));
+    if (mod.usesBackend() && options.sync !== false) {
+      const period = S.month;
+      setStatus(1, `Menghitung periode ${period} di backend...`);
+      const {batch} = await EVKIN.exportBackend.runCanonicalAbsenceCalculation(
+        period, 'Operator', 'Hitung Harian', {hydrate:false, reuse:true}
+      );
+      if (S.month !== period) throw new Error('Periode aktif berubah. Buka kembali periode yang dihitung.');
+      S.workflowLoaded = {};
+      S.harianPage = 0;
+      nipSearch = '';
+      S.rekap = [];
+      S.final = [];
+      await mod.loadPage(true);
+      Object.assign(S.workflowMeta.row_counts, {
+        daily_data:batch.counts.daily, rekap_sdm:batch.counts.rekap, final_absensi:batch.counts.final
+      });
+      S.dailyComplete = true;
+      S.semifinalVerified = true;
+      const count = Number(batch.counts?.daily ?? batch.daily_count ?? S.workflowPages.daily_data.total);
+      setStatus(3, `${count.toLocaleString('id-ID')} baris ${batch.timings?.reused_from ? 'menggunakan hasil tersimpan karena sumber tidak berubah' : 'selesai dihitung dan tersimpan'}.`,
+        {state:'done', done:count, total:count, finishedAt:Date.now()});
+      if (EVKIN.progress) EVKIN.progress({title:'Hitung Harian', percent:100, message:mod.processStatus.message, state:'done'});
+      return S.daily;
+    }
     if (EVKIN.ensureWorkflowDataForComputation) await EVKIN.ensureWorkflowDataForComputation(['processed_data']);
     if (S.workflowLoadError) throw new Error(S.workflowLoadError);
     if (EVKIN.importMod && EVKIN.importMod.saving) throw new Error('Tunggu penyimpanan impor selesai.');
@@ -146,7 +177,7 @@
       S.month = months.length > 0 ? months[0] : '';
     }
     if (monthFilter && !months.includes(monthFilter)) monthFilter = '';
-    const monthOpts = '<option value="">Semua bulan</option>' + months.map(m => `<option value="${m}" ${monthFilter === m ? 'selected' : ''}>${U.monthLabel(m)}</option>`).join('');
+    const monthOpts = (mod.usesBackend() ? '' : '<option value="">Semua bulan</option>') + months.map(m => `<option value="${m}" ${(mod.usesBackend() ? S.month : monthFilter) === m ? 'selected' : ''}>${U.monthLabel(m)}</option>`).join('');
     el.innerHTML = `
       <div class="module-head"><div><h2>③ Hitung Harian</h2><p class="muted">Jabatan mengikuti workbook absensi terbaru. Metode dihitung sesuai pemetaan jabatan pada Konfigurasi.</p></div><div id="harianStageBadge">${mod.processing ? '<span class="pill blue">Sedang berjalan</span>' : EVKIN.stepDone('harian') ? '<span class="pill green">✓ Selesai</span>' : '<span class="pill gray">Belum dihitung</span>'}</div></div>
       <div class="card">
@@ -156,33 +187,41 @@
             <option value="original" ${S.timeMode === 'original' ? 'selected' : ''}>Original</option>
             <option value="wib" ${S.timeMode === 'wib' ? 'selected' : ''}>Normalisasi WIB (Kurangi WITA/WIT)</option>
             <option value="wib-add" ${S.timeMode === 'wib-add' ? 'selected' : ''}>Normalisasi WIB (Tambah WIT/WITA)</option></select></div>
-          <div style="align-self:flex-end"><button class="btn btn-primary" id="btnHitung" data-testid="harian-run"><i data-lucide="calculator"></i> Hitung Semua Data Impor</button></div>
+          <div style="align-self:flex-end"><button class="btn btn-primary" id="btnHitung" data-testid="harian-run"><i data-lucide="calculator"></i> ${runLabel()}</button></div>
         </div>
-        <p class="muted">Seluruh record valid dihitung untuk semua bulan impor. Hari efektif bulan aktif (${U.monthLabel(S.month)}): <b>${EVKIN.configMod.effectiveDays(S.month)}</b> hari</p>
+        <p class="muted">${mod.usesBackend() ? 'Perhitungan backend berlaku untuk periode aktif.' : 'Seluruh record valid dihitung untuk semua bulan impor.'} Hari efektif bulan aktif (${U.monthLabel(S.month)}): <b>${EVKIN.configMod.effectiveDays(S.month)}</b> hari</p>
         <p class="muted">Pulang hari berikutnya dengan jam masuk dan pulang lengkap: <b>potongan harian 0%</b>. Jika salah satu jam kosong, aturan absensi tidak lengkap tetap berlaku.</p>
       </div>
       <div id="harianProcessStatus">${statusView()}</div>
-      <div class="alert info">${S.data.filter(r => !r.deleted).length} record impor aktif · ${S.daily.length} hasil Harian seluruh bulan · ${(S.importStats && S.importStats.rejectedRows) || 0} baris sumber ditolak (NIP/tanggal tidak valid).</div>
-      <div id="harianResult">${S.daily.length ? resultView() : '<div class="alert info">Belum ada data. Klik <b>Hitung Harian</b>.</div>'}</div>
+      <div class="alert info">${mod.usesBackend() ? (S.workflowMeta.row_counts.raw_import || 0) : S.data.filter(r => !r.deleted).length} record impor aktif · ${mod.usesBackend() ? (S.workflowPages.daily_data?.total || 0) + ' hasil Harian sesuai filter' : S.daily.length + ' hasil Harian seluruh bulan'} · ${(S.importStats && S.importStats.rejectedRows) || 0} baris sumber ditolak (NIP/tanggal tidak valid).</div>
+      <div id="harianResult">${(S.daily.length || (mod.usesBackend() && nipSearch)) ? resultView() : '<div class="alert info">Belum ada data. Klik <b>Hitung Harian</b>.</div>'}</div>
     `;
     el.querySelector('#hMonth').onchange = (e) => { monthFilter = e.target.value; if (monthFilter) S.month = monthFilter; S.harianPage = 0; EVKIN.go('harian'); };
-    el.querySelector('#hMode').onchange = (e) => { S.timeMode = e.target.value; EVKIN.invalidateFrom('config'); EVKIN.go('harian'); };
+    el.querySelector('#hMode').onchange = async (e) => {
+      const previous = S.timeMode;
+      S.timeMode = e.target.value;
+      if (mod.usesBackend()) {
+        try { await EVKIN.syncBackendWorkflow(undefined, {sources:['config']}); }
+        catch (error) { S.timeMode = previous; EVKIN.toast(error.message, 'error'); }
+      } else EVKIN.invalidateFrom('config');
+      EVKIN.go('harian');
+    };
     const nipInput = el.querySelector('#harianNipSearch');
-    if (nipInput) nipInput.oninput = (e) => { nipSearch = e.target.value.trim().toLowerCase(); S.harianPage = 0; EVKIN.go('harian'); };
+    if (nipInput) nipInput.onchange = (e) => { nipSearch = e.target.value.trim().toLowerCase(); S.harianPage = 0; EVKIN.go('harian'); };
     el.querySelector('#btnHitung').onclick = async () => {
       if (mod.processing) { refreshStatus(); return; }
-      try { await mod.process(); EVKIN.toast('Hitung harian selesai dan tersimpan: ' + S.daily.length + ' record'); if (el.querySelector('#harianProcessStatus')) EVKIN.go('harian'); }
+      try { await mod.process(); EVKIN.toast('Hitung harian selesai dan tersimpan: ' + (mod.processStatus.total || S.daily.length) + ' record'); if (el.querySelector('#harianProcessStatus')) EVKIN.go('harian'); }
       catch (ex) { EVKIN.toast(ex.message, 'error'); }
     };
     refreshStatus();
 
     // Pagination handlers untuk Hitung Harian
     const ITEMS_PER_PAGE = 10;
-    const totalPages = Math.ceil(filteredDaily().length / ITEMS_PER_PAGE);
+    const totalPages = mod.usesBackend() ? (S.workflowPages.daily_data?.totalPages || 0) : Math.ceil(filteredDaily().length / ITEMS_PER_PAGE);
     const btnHarianPrev = el.querySelector('#harianPrev');
     const btnHarianNext = el.querySelector('#harianNext');
-    if (btnHarianPrev) btnHarianPrev.onclick = () => { S.harianPage = Math.max(0, S.harianPage - 1); EVKIN.save(); EVKIN.go('harian'); };
-    if (btnHarianNext) btnHarianNext.onclick = () => { S.harianPage = Math.min(totalPages - 1, S.harianPage + 1); EVKIN.save(); EVKIN.go('harian'); };
+    if (btnHarianPrev) btnHarianPrev.onclick = () => { S.harianPage = Math.max(0, S.harianPage - 1); EVKIN.go('harian'); };
+    if (btnHarianNext) btnHarianNext.onclick = () => { S.harianPage = Math.min(totalPages - 1, S.harianPage + 1); EVKIN.go('harian'); };
 
     if (window.lucide) lucide.createIcons();
   };
@@ -191,13 +230,14 @@
     const ITEMS_PER_PAGE = 10;
     const d = filteredDaily();
     const tot = d.reduce((a, x) => a + x.totalHarian, 0);
-    const totalPages = Math.ceil(d.length / ITEMS_PER_PAGE);
+    const total = mod.usesBackend() ? (S.workflowPages.daily_data?.total || 0) : d.length;
+    const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
     let currentPage = Math.max(0, Math.min(S.harianPage, totalPages - 1));
     S.harianPage = currentPage;
 
     const startIdx = currentPage * ITEMS_PER_PAGE;
     const endIdx = startIdx + ITEMS_PER_PAGE;
-    const pageData = d.slice(startIdx, endIdx);
+    const pageData = mod.usesBackend() ? d : d.slice(startIdx, endIdx);
 
     const head = ['NIP', 'Nama', 'Jabatan', 'Tgl Kerja', 'Hari', 'Tanggal/Jam Masuk', 'Tanggal/Jam Pulang', 'Durasi', 'Zona', 'Normalisasi', 'Metode', 'Jenis', 'Jadwal', 'Status', 'Libur', 'Cuti', 'Dup', 'Lengkap', 'Terlmbt', 'Plg Cpt', 'Durasi%', 'Tdk Lgkp', 'Total', 'Flag'];
     const rows = pageData.map(x => `<tr class="${x.flags.length ? 'row-flag' : ''}">
@@ -211,7 +251,7 @@
       <td><b>${x.totalHarian}%</b></td><td class="err small">${U.esc(x.flags.join(', '))}</td></tr>`).join('');
 
     const paginationInfo = `<div style="text-align: center; margin: 12px 0; font-size: 13px; color: #666;">
-      <strong>Data ${startIdx + 1}–${Math.min(endIdx, d.length)} dari ${d.length} record</strong> |
+      <strong>Data ${total ? startIdx + 1 : 0}–${Math.min(endIdx, total)} dari ${total} record</strong> |
       <strong>Halaman ${currentPage + 1} dari ${totalPages}</strong>
     </div>`;
 
@@ -224,9 +264,9 @@
       </button>
     </div>`;
 
-    return `<div class="card"><h3>Hasil Harian — ${U.monthLabel(S.month)} <span class="muted">(${d.length} record)</span></h3>
+    return `<div class="card"><h3>Hasil Harian — ${U.monthLabel(S.month)} <span class="muted">(${total} record)</span></h3>
       <div class="filter-bar"><input type="search" id="harianNipSearch" placeholder="Cari NIP..." value="${U.esc(nipSearch)}" data-testid="harian-nip-search" /></div>
-      <p class="muted">Total potongan harian terkumpul: <b>${U.round2(tot)}%</b> (akan direkap per SDM).</p>
+      <p class="muted">${mod.usesBackend() ? 'Total potongan pada halaman ini:' : 'Total potongan harian terkumpul:'} <b>${U.round2(tot)}%</b> (akan direkap per SDM).</p>
       <div class="table-wrap"><table class="data-table sm" data-testid="harian-table"><thead><tr>${head.map(h => '<th>' + h + '</th>').join('')}</tr></thead><tbody>${rows}</tbody></table></div>
       ${paginationInfo}
       ${paginationButtons}
@@ -235,6 +275,7 @@
   }
 
   function filteredDaily() {
+    if (mod.usesBackend()) return S.daily;
     const rows = monthFilter ? S.daily.filter(x => (x.monthKey || x.bulan || String(x.tanggalKey || '').slice(0,7)) === monthFilter) : S.daily;
     return nipSearch ? rows.filter(x => String(x.nip || '').toLowerCase().includes(nipSearch)) : rows;
   }

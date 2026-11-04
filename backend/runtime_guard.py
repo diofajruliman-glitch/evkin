@@ -218,8 +218,11 @@ async def serialize_database_requests(request, call_next):
                                    'Reset aplikasi sedang berlangsung. Tunggu lalu muat ulang halaman.')
         client_generation = _client_generation(request)
         if client_generation is None:
-            return _error_response(409, 'GENERATION_REQUIRED',
-                                   'Generation aplikasi wajib dikirim untuk operasi perubahan data.')
+            if path.startswith('/api/jobs'):
+                client_generation = state['reset_generation']
+            else:
+                return _error_response(409, 'GENERATION_REQUIRED',
+                                       'Generation aplikasi wajib dikirim untuk operasi perubahan data.')
         if client_generation != state['reset_generation']:
             return _error_response(409, 'STALE_CLIENT_AFTER_RESET',
                                    'Data operasional telah direset dari sesi lain. Halaman harus dimuat ulang sebelum melanjutkan.')

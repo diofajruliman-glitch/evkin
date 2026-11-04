@@ -21,17 +21,17 @@ from typing import Any, Iterable
 
 BASELINE_ID = "ABSENCE_JS_BASELINE_2026_09"
 BASELINE_SOURCE_SHA256 = {
-    "assets/js/utils.js": "891a4417df038c1f5f892de4b7240603df72bd7aed02fd3300e7c10b1b6681a0",
-    "assets/js/data.js": "3991e8df1ce7d20cc16048f87e9d6c7de4f72fcf9367b8a217ebb6e5c4f87f3e",
-    "assets/js/state.js": "4de7593aafb8d78051b3c93188a633d6093617b91d15450ed8937f0dda4dc73b",
-    "assets/js/import.js": "c5cf4080e4b7e0554b41edf549ba71f9cfeb8876d63e42957d20beb41bb289b7",
-    "assets/js/import-wali.js": "4576b67eccc41487808a7721caaaa0febc0955b40e5ad2ac26c6ebaa12525b20",
-    "assets/js/calc.js": "586cea0362a5c22aea4cfd28b225e60201579005b1b9259d81a9bf5ea1b6fbe2",
-    "assets/js/harian.js": "eb5a92f9212ff67b7977d9406821749616173a5ab539a945dc2f44cecb23e8dc",
-    "assets/js/semifinal.js": "1152a615e93e7c7ed288d2b9de5db208f29478c9a96d73df9e4a202db7dbfdd8",
-    "assets/js/rekap.js": "2cc23a51979ad3e8968d6fd234eb3996450499a67c06f81059163c45667406f2",
-    "assets/js/final.js": "3edc360107986872db8a6becf7d4da35c40937b5cb740e3f06ff600fcbae01d1",
-    "assets/js/app.js": "58efb9615488f90b5061c37c56d0332ac288aebd8713d4c7f0009c87bd5c7308",
+    "assets/js/utils.js": "5688219983fc60595d94f346eea446e0017167925209910ac11dc576023bb451",
+    "assets/js/data.js": "2cce3d441bf841bb7cac2e071e210e79585445f44b56fcb9b89bd3dbb2b32f7c",
+    "assets/js/state.js": "a8bb9b95b676ca282f9921ef8a0823c317c7778758a65e2a94d022de6d73134d",
+    "assets/js/import.js": "24232d62278414d81f2fc2b819df49e256039cb64a4c63cb03bcaf82d01497b4",
+    "assets/js/import-wali.js": "7677b1f865729ad5ae748be63f103856a5b3eae878ec7272c1c3074f82127657",
+    "assets/js/calc.js": "1bd39a7e3200959d28b06023149b5d3379b1f8e0d727f950d0cf0cb5298f2b6b",
+    "assets/js/harian.js": "2ecd15eb1e390736132d0ec6498848544a44dee3e79cd05735a11e069a7f2a04",
+    "assets/js/semifinal.js": "8fd7fb8c1d78df16cb86a4027c14ae16e261afec074cb2e2fd5c4e29d644cbfc",
+    "assets/js/rekap.js": "c94c37e4ed549f702e81e7eaf6cd3c067f23cd5d0b44f3cebae1e825d70959ef",
+    "assets/js/final.js": "14badb92ecf785f3e8450f9b650438d0ece2526e15ee6fea4129ae5a3b937b47",
+    "assets/js/app.js": "b90e9108a2558497e66450aad3ef8d2a1b3c3616e4ac4105d479f2631ba1b535",
 }
 BASELINE_GOLDEN_SHA256 = "15ac3c67be87436f8ea16867cf1ead1c467c7ddbcdfbde6f89bfaf0ec9f664d7"
 
@@ -583,6 +583,10 @@ def compute_record(record: dict[str, Any], context: CalculationContext, mode: st
     if check_in is None or check_out is None:
         result["statusLengkap"] = "Tidak Lengkap"
         result["statusAbsensi"] = "LUPA_ABSEN_MASUK" if check_in is None else "LUPA_ABSEN_PULANG"
+        if method == "durasi" and job.lower() == "wali asuh":
+            result["statusAbsensi"] = "PERLU_VALIDASI"
+            result["flags"].append("REKAMAN SHIFT TIDAK LENGKAP - CEK REKAP HARI KERJA")
+            return result
         result["potTidakLengkap"] = _compact_number(js_number(config.get("potonganTidakLengkap")))
         result["totalHarian"] = result["potTidakLengkap"]
         result["flags"].append("ABSENSI TIDAK LENGKAP")
@@ -881,7 +885,7 @@ def validate_source_fingerprint(repo_root: str | Path) -> dict[str, Any]:
     actual = {}
     for relative, expected in BASELINE_SOURCE_SHA256.items():
         path = root / relative
-        digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() if path.exists() else None
         actual[relative] = digest
         if digest != expected:
             differences.append({"file": relative, "expected": expected, "actual": digest})

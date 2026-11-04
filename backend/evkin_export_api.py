@@ -27,6 +27,7 @@ from datetime import datetime
 import concurrent.futures
 import threading
 from backend.runtime_guard import (
+    DATABASE_GATE,
     StaleGenerationError,
     assert_current_generation,
     claim_database,
@@ -722,7 +723,7 @@ def prepare_excel_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def _write_workbook_stream(output: io.BytesIO, sheets: dict[str, pd.DataFrame]) -> None:
     """Write workbook to a BytesIO using a low-overhead xlsxwriter config for fast export."""
     with pd.ExcelWriter(output, engine='xlsxwriter', engine_kwargs={'options': {'in_memory': True}}) as writer:
-        MAX_EXCEL_ROWS = 1048576
+        MAX_EXCEL_ROWS = 1_048_575
 
         def _write_df_split(df: pd.DataFrame, sheet_name: str) -> None:
             base = sheet_name[:28]
@@ -754,8 +755,20 @@ def build_export_query(table: str, bulan: str, columns: set[str], unit: Optional
                                     f"Data sumber export '{table}' periode {bulan} belum tersedia.", 404)
     clauses = []
     params: list[str] = []
-    if "bulan" in columns:
-        clauses.append('"bulan" = ?')
+    lower = {key.lower(): key for key in columns}
+    period_column = next((lower[key] for key in ("bulan", "periode", "monthkey", "tanggalkey", "tanggal") if key in lower), None)
+    if period_column:
+        if period_column.lower() == "bulan":
+            clauses.append('"bulan" = ?')
+        elif period_column.lower() in ("bulan", "periode"):
+            clauses.append(f'"{period_column}" = ?')
+        elif period_column.lower() == "tanggal":
+            clauses.append("""coalesce(strftime(try_cast("tanggal" AS DATE), '%Y-%m'),
+                strftime(try_strptime(cast("tanggal" AS VARCHAR), '%d/%m/%Y'), '%Y-%m'),
+                strftime(try_strptime(cast("tanggal" AS VARCHAR), '%d-%m-%Y'), '%Y-%m'),
+                substr(cast("tanggal" AS VARCHAR), 1, 7)) = ?""")
+        else:
+            clauses.append(f'substr(cast("{period_column}" AS VARCHAR), 1, 7) = ?')
         params.append(bulan)
     if unit and "unit" in columns:
         clauses.append('"unit" = ?')
@@ -1852,26 +1865,45 @@ EXPORT_DIR = str(Path(__file__).resolve().parent / 'exports')
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 
-@database_job
-def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: list, fmt: str = 'xlsx', jabatan: Optional[str] = None, expected_final: Optional[dict] = None) -> str:
+EXCEL_SHEET_ROWS = 1_048_576
+
+DEFAULT_SHEET_HEADERS = {
+    'DATA SUMBER': ['nip', 'nama', 'jabatan', 'unit', 'tanggal', 'zona', 'jamMasuk', 'jamPulang', 'durasi', 'jenis'],
+    'HITUNG HARIAN': ['NIP', 'Nama', 'Jabatan', 'Tanggal', 'Hari', 'Jam Masuk', 'Jam Pulang', 'Durasi', 'Zona', 'Jam Normalisasi', 'Metode', 'Jenis Absensi', 'Status Hari Libur', 'Status Cuti', 'Status Duplikasi', 'Absensi Lengkap', 'Pot Keterlambatan', 'Pot Pulang Cepat', 'Pot Durasi', 'Pot Tidak Lengkap', 'Total Potongan Harian', 'Flag'],
+    'REKAP SDM': ['NIP', 'Nama', 'Jabatan', 'Jumlah Hari Kerja', 'Jumlah Hari Masuk', 'Jumlah Hari Absen', 'Total Potongan', 'Keterangan'],
+    'FINAL ABSENSI': ['NIP', 'Nama', 'Jabatan', 'Bulan', 'Unit', 'Tukin', 'Komponen Kehadiran', 'Potongan %', 'Nominal Potongan', 'Final Dibayar'],
+    'FINAL + SKP': ['NIP', 'Nama', 'Jabatan', 'Bulan', 'Unit', 'Tukin', 'Final Absensi', 'Nilai SKP', 'Potongan SKP', 'Final Dibayar'],
+    'FINAL KOMBINASI': ['NIP', 'Nama', 'Jabatan', 'Bulan', 'Unit', 'Tukin', 'Potongan %', 'Final Dibayar'],
+    'FINAL + SKP KOMBINASI': ['NIP', 'Nama', 'Jabatan', 'Bulan', 'Unit', 'Tukin', 'Final Dibayar'],
+    'SEMI FINAL': ['NIP', 'Nama', 'Jabatan', 'Tanggal', 'Status Duplikasi', 'Status Lengkap', 'Flag'],
+    'ANOMALI': ['NIP', 'Nama', 'Jabatan', 'Tanggal', 'Status Duplikasi', 'Status Lengkap', 'Flag']
+}
+
+
+
+def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: list, fmt: str = 'xlsx', jabatan: Optional[str] = None, expected_final: Optional[dict] = None, calculation_id: Optional[str] = None, job_generation: Optional[int] = None) -> str:
     """Background worker to generate export file. Returns path to result file.
     Writes progress updates to jobs table. Supports 'xlsx' and 'csv' formats (csv -> zip of per-sheet csvs).
     """
     conn = get_connection()
     temp_path = None
     verified_final = None
+    generation = current_reset_generation() if job_generation is None else job_generation
     try:
         _update_job(job_id, status='running', started_at=_now_iso(), progress=0.01, message='Starting export')
         try:
+            assert_current_generation(generation)
             if not EXPORT_PERIOD_RE.fullmatch(str(bulan or "")):
                 raise ExportValidationError("EXPORT_SOURCE_NOT_READY", f"Periode export tidak valid: {bulan!r}.")
-            if fmt not in ('xlsx', 'csv'):
+            if fmt not in ('xlsx', 'csv') or calculation_id:
                 fmt = 'xlsx'
             # Build sheet -> table mapping same as export_workbook
             tables = {
                 'DATA SUMBER': 'raw_import',
                 'HITUNG HARIAN': 'hitung_harian',
                 'REKAP SDM': 'rekap_sdm',
+                'SEMI FINAL': 'hitung_harian',
+                'ANOMALI': 'hitung_harian',
                 'FINAL ABSENSI': 'final_absensi',
                 'FINAL + SKP': 'final_skp',
                 'FINAL KOMBINASI': 'final_kombinasi',
@@ -1892,59 +1924,104 @@ def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: li
             if fmt == 'xlsx':
                 result_path = os.path.join(EXPORT_DIR, f'{job_id}.xlsx')
                 temp_path = os.path.join(EXPORT_DIR, f'{job_id}.tmp.xlsx')
-                # pandas emits cells column-by-column. XlsxWriter's
-                # constant_memory mode flushes earlier rows, silently dropping
-                # later columns. Use normal mode and keep disk-backed output.
-                with pd.ExcelWriter(
-                    temp_path,
-                    engine='xlsxwriter',
-                    engine_kwargs={'options': {'strings_to_formulas': False, 'strings_to_urls': False}},
-                ) as writer:
+                import xlsxwriter
+                with duckdb.connect(DUCKDB_PATH) as snapshot, xlsxwriter.Workbook(
+                    temp_path, {'constant_memory': True, 'strings_to_formulas': False,
+                                'strings_to_urls': False, 'use_zip64': True, 'default_date_format': 'yyyy-mm-dd hh:mm:ss'}
+                ) as workbook:
+                    snapshot.execute("BEGIN TRANSACTION")
+                    batch_counts = {}
+                    config = read_workflow_config(snapshot) or {}
+                    active = config.get('_workflow') or {}
+                    workflow_id = active.get('workflow_id') or active.get('workflowId') or 'default'
+                    if calculation_id:
+                        batch = snapshot.execute("""
+                            SELECT b.daily_count, b.rekap_count, b.final_count, b.timing_json
+                            FROM absence_calculation_canonical c
+                            JOIN absence_calculation_batch b USING (calculation_id)
+                            WHERE c.period=? AND c.calculation_id=? AND b.status='COMPLETED' AND b.canonical
+                        """, [bulan, calculation_id]).fetchone()
+                        if batch is None:
+                            raise ValueError('Hasil periode sudah berubah. Buka ulang halaman Export.')
+                        if (json.loads(batch[3] or '{}').get('source_workflow_id') or 'default') != workflow_id:
+                            raise ValueError('Workbook aktif berubah. Jalankan Hitung Harian sebelum ekspor.')
+                        batch_counts = dict(zip(('hitung_harian', 'rekap_sdm', 'final_absensi'), batch[:3]))
                     for name in selected:
-                        tbl = tables.get(name)
-                        if not tbl:
-                            written_sheets += 1
-                            _update_job(
-                                job_id,
-                                progress=0.05 + 0.9 * (written_sheets / max(1, total_sheets)),
-                                message=f'Skip sheet {name}',
-                            )
-                            continue
-                        _update_job(
-                            job_id,
-                            progress=0.05 + 0.9 * (written_sheets / max(1, total_sheets)),
-                            message=f'Preparing sheet {name}',
-                        )
+                        table = tables[name]
+                        _update_job(job_id, progress=0.05 + 0.9 * written_sheets / total_sheets,
+                                    message=f'Menulis sheet {name}')
+                        columns = {r[1] for r in snapshot.execute(f"PRAGMA table_info('{table}')").fetchall()}
                         try:
-                            df = read_workflow_table_duckdb(tbl, bulan, unit, jabatan)
-                        except HTTPException as he:
-                            if he.status_code != 404:
+                            query, params = build_export_query(table, bulan, columns, unit, jabatan)
+                        except ExportValidationError as exc:
+                            if exc.status_code != 404 or table in batch_counts:
                                 raise
-                            df = pd.DataFrame()
+                            sheet_headers = DEFAULT_SHEET_HEADERS.get(name, [name])
+                            workbook.add_worksheet(name).write_row(0, 0, sheet_headers)
+                            written_sheets += 1
+                            continue
+                        if table == 'raw_import' and 'workflow_id' in columns:
+                            has_matching_wf = snapshot.execute('SELECT 1 FROM "raw_import" WHERE "workflow_id" = ? LIMIT 1', [workflow_id]).fetchone()
+                            if has_matching_wf:
+                                query += (' AND ' if ' WHERE ' in query else ' WHERE ') + '"workflow_id" = ?'
+                                params.append(workflow_id)
+                        if table in batch_counts:
+                            if 'calculation_id' not in columns:
+                                raise ValueError(f'Sumber {name} bukan hasil batch aktif.')
+                            query += (' AND ' if ' WHERE ' in query else ' WHERE ') + '"calculation_id" = ?'
+                            params.append(calculation_id)
+                        if calculation_id and table.startswith('final_') and table not in batch_counts:
+                            if 'calculation_id' not in columns:
+                                raise ValueError(f'Sumber {name} belum disimpan dari Final aktif.')
+                            query += (' AND ' if ' WHERE ' in query else ' WHERE ') + '"calculation_id" = ?'
+                            params.append(calculation_id)
+                        report = name in {'SEMI FINAL', 'ANOMALI'}
+                        if report:
+                            checks = []
+                            if 'statusDuplikasi' in columns:
+                                checks.append("lower(coalesce(cast(statusDuplikasi AS VARCHAR), '')) NOT IN ('', 'false', '0')")
+                            if 'statusLengkap' in columns:
+                                checks.append("statusLengkap = 'Tidak Lengkap'")
+                            if 'flags' in columns:
+                                checks.append("coalesce(cast(flags AS VARCHAR), '[]') NOT IN ('', '[]')" if name == 'SEMI FINAL'
+                                              else "contains(coalesce(cast(flags AS VARCHAR), ''), 'PERLU_VALIDASI')")
+                            query += (' AND ' if ' WHERE ' in query else ' WHERE ') + '(' + ' OR '.join(checks or ['FALSE']) + ')'
+                        cursor = snapshot.execute(query + ' ORDER BY rowid', params)
+                        headers = [item[0] for item in cursor.description]
+                        sheet = workbook.add_worksheet(name)
+                        sheet.write_row(0, 0, headers)
+                        offset, part, row_count = 1, 1, 0
+                        final_rows = []
+                        while rows := cursor.fetchmany(4096):
+                            for row in rows:
+                                if offset == EXCEL_SHEET_ROWS:
+                                    part += 1
+                                    suffix = f' ({part})'
+                                    sheet = workbook.add_worksheet(name[:31-len(suffix)] + suffix)
+                                    sheet.write_row(0, 0, headers)
+                                    offset = 1
+                                values = [safe_excel_value(value) for value in row]
+                                if sheet.write_row(offset, 0, values) != 0:
+                                    raise ValueError(f'Baris {offset} gagal ditulis ke {name}')
+                                offset += 1
+                                row_count += 1
+                                if row_count % 65_536 == 0:
+                                    _update_job(job_id, message=f'{name}: {row_count:,} baris ditulis')
+                                if name == 'FINAL ABSENSI':
+                                    final_rows.append(dict(zip(headers, row)))
+                        if table in batch_counts and not report and row_count != batch_counts[table]:
+                            raise ValueError(f'Jumlah baris {name} berbeda dari batch aktif.')
                         if name == 'FINAL ABSENSI':
-                            verified_final = final_manifest(df.to_dict('records'))
-                            if expected_final is not None:
-                                assert_manifest(verified_final, expected_final)
-                            if not verified_final['row_count']:
-                                raise ValueError('Final Absensi kosong untuk periode yang dipilih')
-                        if df is None or df.empty:
-                            # write empty sheet placeholder
-                            pd.DataFrame([['-']]).to_excel(writer, index=False, header=[name[:30]], sheet_name=name[:31])
-                        else:
-                            prepare_excel_frame(df).to_excel(writer, index=False, sheet_name=(name[:31]))
+                            if final_rows:
+                                verified_final = final_manifest(final_rows)
+                                if expected_final is not None:
+                                    assert_manifest(verified_final, expected_final)
+                            elif expected_final is not None and expected_final.get('row_count', 0) > 0:
+                                raise ValueError('Final Absensi di database kosong untuk periode yang dipilih')
                         written_sheets += 1
-                        _update_job(
-                            job_id,
-                            progress=0.05 + 0.9 * (written_sheets / max(1, total_sheets)),
-                            message=f'Sheet {name} selesai ({written_sheets}/{total_sheets})',
-                        )
-                if verified_final is not None:
+                if verified_final is not None and verified_final.get('row_count', 0) > 0:
                     _update_job(job_id, progress=.96, message='Memeriksa jumlah baris, NIP dan total nominal dalam Excel...')
                     verify_final_xlsx(temp_path, verified_final)
-                # Only publish the file after validation succeeds.
-                os.replace(temp_path, result_path)
-                if verified_final is not None:
-                    Path(result_path + '.validation.json').write_text(json.dumps(verified_final), encoding='utf-8')
             else:
                 # CSV: create zip of CSV files per sheet
                 import zipfile
@@ -1980,10 +2057,23 @@ def run_export_job(job_id: str, bulan: str, unit: Optional[str], sheet_names: li
                                 assert_manifest(final_manifest(reread.to_dict('records')), verified_final)
                             zf.writestr(csv_name, csv_buf)
                         written_sheets += 1
-                os.replace(temp_path, result_path)
-            # finalize
+            # Publish under the reset fence; reading the snapshot and writing Excel need not block the app.
             message = ('Validasi lulus: ' + str(verified_final['row_count']) + ' baris Final; bruto ' + verified_final['gross'] + ', potongan ' + verified_final['deduction'] + ', dibayar ' + verified_final['paid']) if verified_final else 'Export complete'
-            _update_job(job_id, status='finished', finished_at=_now_iso(), progress=1.0, message=message, result_table=result_path)
+            with DATABASE_GATE:
+                assert_current_generation(generation)
+                if calculation_id:
+                    with duckdb.connect(DUCKDB_PATH) as latest:
+                        active_id = latest.execute(
+                            "SELECT calculation_id FROM absence_calculation_canonical WHERE period=?", [bulan]
+                        ).fetchone()
+                        active_manifest = (read_workflow_config(latest) or {}).get('_workflow') or {}
+                        active_workflow = active_manifest.get('workflow_id') or active_manifest.get('workflowId') or 'default'
+                        if active_id != (calculation_id,) or active_workflow != workflow_id:
+                            raise ValueError('Hasil atau workbook berubah saat ekspor. Coba lagi.')
+                os.replace(temp_path, result_path)
+                if fmt == 'xlsx' and verified_final is not None:
+                    Path(result_path + '.validation.json').write_text(json.dumps(verified_final), encoding='utf-8')
+                _update_job(job_id, status='finished', finished_at=_now_iso(), progress=1.0, message=message, result_table=result_path)
             return result_path
         except Exception as e:
             if temp_path and os.path.exists(temp_path):
@@ -2315,6 +2405,11 @@ def compute_harian_core(bulan: str, time_mode: str = 'original', unit: Optional[
                     chunk.at[idx, 'flags'] += 'JENIS BEBAS POTONGAN; '
                     chunk.at[idx, 'totalHarian'] = 0.0
                     continue
+                if (r['metode'] == 'durasi' and r['jabatan_resolved'].lower() == 'wali asuh'
+                        and r['statusLengkap'] == 'Tidak Lengkap'):
+                    chunk.at[idx, 'potTidakLengkap'] = 0.0
+                    chunk.at[idx, 'totalHarian'] = 0.0
+                    continue
                 if r.get('crossDay') and r['statusLengkap'] == 'Lengkap':
                     chunk.at[idx, 'flags'] += 'PULANG HARI BERIKUTNYA; '
                     chunk.at[idx, 'totalHarian'] = 0.0
@@ -2635,7 +2730,9 @@ def compute_harian_duckdb(job_id: str, bulan: str, time_mode: str, unit: Optiona
                 f"THEN ({durasi_case}) ELSE 0 END"
             )
             incomplete_pct_expr = (
-                f"CASE WHEN NOT {complete_expr} THEN {cfg.get('potonganTidakLengkap', 3)} ELSE 0 END"
+                f"CASE WHEN NOT {complete_expr} AND NOT (({duration_method_expr}) "
+                f"AND lower(trim(coalesce(jabatan, ''))) = 'wali asuh') "
+                f"THEN {cfg.get('potonganTidakLengkap', 3)} ELSE 0 END"
             )
             total_pct_expr = (
                 f"({incomplete_pct_expr} + {late_pct_expr} + "
@@ -2763,7 +2860,7 @@ def create_export_job(payload: dict) -> dict:
     jabatan = payload.get('jabatan')
     sheet_names = payload.get('sheet_names') or []
     unsupported = [name for name in sheet_names if name not in {
-        'DATA SUMBER', 'HITUNG HARIAN', 'REKAP SDM', 'FINAL ABSENSI',
+        'DATA SUMBER', 'HITUNG HARIAN', 'REKAP SDM', 'SEMI FINAL', 'ANOMALI', 'FINAL ABSENSI',
         'FINAL + SKP', 'FINAL KOMBINASI', 'FINAL + SKP KOMBINASI',
     }]
     if unsupported:
@@ -2783,7 +2880,7 @@ def create_export_job(payload: dict) -> dict:
         conn.commit()
     finally:
         conn.close()
-    future = _executor.submit(run_export_job, new_job_id, bulan, unit, sheet_names, fmt, jabatan, payload.get('expected_final'))
+    future = _executor.submit(run_export_job, new_job_id, bulan, unit, sheet_names, fmt, jabatan, payload.get('expected_final'), payload.get('calculation_id'), current_reset_generation())
     _job_futures[new_job_id] = future
     return {'status': 'ok', 'job_id': new_job_id}
 
@@ -2831,7 +2928,15 @@ def api_download_job_result(job_id: str):
             media = 'application/zip'
         else:
             media = 'application/octet-stream'
-        return FileResponse(path, media_type=media, filename=os.path.basename(path))
+        download_name = os.path.basename(path)
+        try:
+            payload = json.loads(row['payload'] or '{}')
+            bulan = payload.get('bulan')
+            if bulan and path.endswith('.xlsx'):
+                download_name = f"EVKIN_ABSENSI_{bulan}.xlsx"
+        except Exception:
+            pass
+        return FileResponse(path, media_type=media, filename=download_name)
     finally:
         conn.close()
 

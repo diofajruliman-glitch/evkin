@@ -23,6 +23,26 @@ async function main() {
   assert.equal(payload.final_combined_skp[0].totalPotonganPct,17);
   assert.equal(payload.final_combined_skp[0].totalNominalPotongan,340000);
   assert.equal(payload.final_combined_skp[0].finalDibayarKombinasiSKP,1660000);
+  const legacyFinal = E.state.final;
+  vm.runInNewContext(fs.readFileSync('assets/js/final.js', 'utf8'), {window:{EVKIN:E}, console});
+  E.harianMod = {usesBackend:()=>true};
+  E.state.final = [{nip:'WORKFLOW', calculation_id:'active', tukin:5000001, komponen:1500000, nominal:150000, potPct:10}];
+  E.state.finalSKP = {rows:[{nip:'WORKFLOW',skpPct:33.3}]};
+  E.state.finalKombinasi = {useApp:false,useEabsensi:true,rows:[{nip:'WORKFLOW',eabs:8.3}]};
+  E.state.finalCombinedSKP = {useApp:true,useEabsensi:true,eabsensiRows:[{nip:'WORKFLOW',pct:8.3}],
+    skpRows:[{nip:'WORKFLOW',pct:12.34}]};
+  await E.syncBackendWorkflow(undefined,{finalOnly:true});
+  assert.equal(payload.final_absensi, undefined, 'Optional sync must not replace the canonical Final');
+  assert.equal(payload.final_skp[0].nominalSKP,1165500);
+  assert.equal(payload.final_kombinasi[0].nominalKombinasi,124500);
+  assert.equal(payload.final_combined_skp[0].totalNominalPotongan,556400);
+  assert.equal(payload.final_combined_skp[0].finalDibayarKombinasiSKP,4443601);
+  for (const source of ['final_skp','final_kombinasi','final_combined_skp']) {
+    assert.deepEqual(payload[source], E.finalMod.optionalRows(source, E.state.final));
+    assert.equal(payload[source][0].calculation_id,'active');
+  }
+  E.harianMod = undefined;
+  E.state.final = legacyFinal;
   const tableWrites=[];const beforeImportSyncCalls=syncCalls;
   E.state.raw=Array.from({length:15001},(_,i)=>({nip:String(i),tanggal:'2026-08-01'}));
   E.state.data=E.state.raw.map(row=>({...row,tanggal:{monthKey:'2026-08',key:'2026-08-01'}}));

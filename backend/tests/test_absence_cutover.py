@@ -366,3 +366,63 @@ def test_latest_static_route_is_not_captured_as_calculation_id(tmp_path):
         response = client.get("/api/absence/calculation/latest?period=2026-08")
     assert response.status_code == 200
     assert response.json()["calculation_id"] == batch["calculation_id"]
+
+def test_canonical_export_matches_application_pages_and_rejects_superseded_batch(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    from backend import evkin_export_api as api
+    from backend.tests.test_final_export_complete import setup_export
+
+    setup_export(monkeypatch, tmp_path)
+    path = fixture_database(tmp_path)
+    monkeypatch.setattr(api, "DUCKDB_PATH", str(path))
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("""UPDATE raw_import SET "Jam Pulang" = '' WHERE "Tanggal" = '2026-08-03'""")
+    svc, _ = service(path)
+    period = "2026-08"
+    batch = svc.calculate_sync(period, "tester")
+    assert batch["status"] == "COMPLETED", batch.get("error_message")
+    reused = svc.calculate_sync(period, "tester", reuse=True)
+    assert reused["status"] == "COMPLETED"
+    assert reused["calculation_id"] != batch["calculation_id"]
+    assert reused["published_calculation_id"] == batch["calculation_id"]
+    assert reused["counts"] == batch["counts"]
+    sources = {"HITUNG HARIAN":"daily_data", "REKAP SDM":"rekap_sdm", "FINAL ABSENSI":"final_absensi",
+               "FINAL + SKP":"final_skp", "FINAL KOMBINASI":"final_kombinasi",
+               "FINAL + SKP KOMBINASI":"final_combined_skp"}
+    with duckdb.connect(str(path)) as conn:
+        for table in ("final_skp", "final_kombinasi", "final_combined_skp"):
+            conn.execute(f"CREATE TABLE {table} AS SELECT *, 87.5 AS variantRate FROM final_absensi")
+    workbook = load_workbook(api.run_export_job("canonical", period, None,
+        ["DATA SUMBER", *sources, "SEMI FINAL", "ANOMALI"], calculation_id=batch["calculation_id"]), read_only=True)
+    try:
+        assert len(list(workbook["DATA SUMBER"].values)) == 3
+        for name in ["SEMI FINAL", "ANOMALI"]:
+            header, row = list(workbook[name].values)
+            report = dict(zip(header, row))
+            assert report["statusLengkap"] == "Tidak Lengkap"
+            assert report["totalHarian"] == 3
+        for name, source in sources.items():
+            header, *excel_rows = list(workbook[name].values)
+            actual = [dict(zip(header, row)) for row in excel_rows]
+            expected = []
+            for page in range(1, len(actual) + 1):
+                result = api.get_workflow_data(source, page=page, per_page=1, periode=period,
+                                               workflow_id="default", include_detail=True)
+                expected.extend(result["rows"])
+            assert len(actual) == len(expected)
+            fields = {"daily_data": ("nip", "jabatan", "metode", "totalHarian"),
+                      "rekap_sdm": ("nip", "jabatan", "total"),
+                      "final_absensi": ("nip", "tukin", "nominal", "finalDibayar")}.get(source, ("nip", "variantRate"))
+            assert [tuple(row[key] for key in fields) for row in actual] == [
+                tuple(row[key] for key in fields) for row in expected]
+    finally:
+        workbook.close()
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("""UPDATE raw_import SET "Jam Datang" = '07:39' WHERE "Tanggal" = '2026-08-04'""")
+    updated = svc.calculate_sync(period, "tester", reuse=True)
+    assert updated["status"] == "COMPLETED"
+    assert updated["published_calculation_id"] == updated["calculation_id"]
+    with pytest.raises(ValueError, match="Hasil periode sudah berubah"):
+        api.run_export_job("superseded", period, None, ["HITUNG HARIAN"],
+                           calculation_id=batch["calculation_id"])
+    assert not (tmp_path / "superseded.xlsx").exists()

@@ -154,6 +154,8 @@ Jam dasar: Senin–Kamis 07:30–16:00, Jumat 07:30–16:30. Menghitung keterlam
 
 ---
 
+**Wali Asuh (metode Durasi):** jam masuk/pulang yang kosong menjadi catatan pemeriksaan, tanpa potongan harian karena rekaman tidak lengkap. Tanggal dengan minimal satu rekaman tetap dihitung hadir, termasuk akhir pekan atau libur. Tanggal tanpa rekaman tidak langsung dipotong; Rekap menghitung selisih antara hari efektif dan jumlah hari hadir/kredit yang sah.
+
 ## 5. Konfigurasi
 - **Kalender & Hari Efektif:** hari libur nasional 2026 bawaan (dapat diedit/ditambah). Mode hari efektif **Otomatis** (dari kalender) atau **Manual** (override).
 - **Master Jabatan:** peta jabatan → metode (Durasi/Reguler), dapat diubah.
@@ -181,8 +183,18 @@ Pada Hitung Harian pilih mode **Original** atau **Normalisasi WIB** (WITA −1 j
 ---
 
 ## 8. Export Excel
+
+Pada launcher dengan mode Python canonical, **Hitung Periode Aktif** memproses satu
+periode dan menyimpan Harian, Rekap, dan Final langsung ke DuckDB. Hasil periode
+yang sumber, aturan, dan Master SDM-nya belum berubah dapat dipakai kembali. Halaman
+Harian, Semi Final, dan Rekap mengambil halaman yang sedang ditampilkan.
+Ekspor berjalan sebagai job backend dari batch periode yang sama. File XLSX
+memuat seluruh baris sheet terpilih, bukan hanya halaman yang sedang tampil.
+Sheet yang melebihi 1.048.575 baris data (ditambah header) dilanjutkan pada
+sheet bernomor. Excel baru tersedia untuk diunduh setelah pemeriksaan Final.
+
 Tersedia setelah Final. Sheet: `DATA SUMBER`, `HITUNG HARIAN`, `REKAP SDM`, `SEMI FINAL`,
-`FINAL ABSENSI`, `ANOMALI`, serta `FINAL + SKP` dan `FINAL KOMBINASI` bila diaktifkan.
+`FINAL ABSENSI`, `ANOMALI`, serta `FINAL + SKP`, `FINAL KOMBINASI`, dan `FINAL + SKP KOMBINASI` bila diaktifkan.
 Dilengkapi header, autofilter, freeze pane, serta format tanggal/jam/persen/Rupiah dan baris total.
 
 ---

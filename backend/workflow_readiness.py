@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,7 +45,7 @@ def _period_rows(rows: list[dict[str, Any]], period: str) -> list[dict[str, Any]
     for row in rows:
         value = row.get("bulan") or row.get("monthKey")
         if value is None:
-            value = str(row.get("tanggalKey") or row.get("tanggal") or "")[:7]
+            value = str(row.get("tanggalKey") or row.get("tanggal") or row.get("tgl_finger") or "")[:7]
         if str(value) == period:
             result.append(row)
     return result
@@ -71,8 +70,9 @@ def _period_clause(columns: set[str], period: str) -> tuple[str, list[str]]:
         return ' WHERE CAST("bulan" AS VARCHAR) = ?', [period]
     if "monthKey" in columns:
         return ' WHERE CAST("monthKey" AS VARCHAR) = ?', [period]
-    if "tanggalKey" in columns:
-        return ' WHERE substr(CAST("tanggalKey" AS VARCHAR), 1, 7) = ?', [period]
+    for column in ("tanggalKey", "tanggal", "tgl_finger"):
+        if column in columns:
+            return f' WHERE substr(CAST("{column}" AS VARCHAR), 1, 7) = ?', [period]
     return "", []
 
 
@@ -97,6 +97,8 @@ def _database_signature(conn: duckdb.DuckDBPyConnection, period: str) -> str:
     payload = "|".join([
         _relation_signature(conn, "hitung_harian", period),
         _relation_signature(conn, "anomali", period),
+        _relation_signature(conn, "raw_import", period),
+        _relation_signature(conn, "workflow_config", period),
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -116,12 +118,26 @@ def _flag(conn: duckdb.DuckDBPyConnection, period: str) -> bool:
 
 def _stale(conn: duckdb.DuckDBPyConnection, period: str) -> bool:
     if not _table_exists(conn, "workflow_readiness_meta"):
-        return False
+        return _flag(conn, period)
     row = conn.execute(
         "SELECT source_signature FROM workflow_readiness_meta WHERE period = ?",
         [period],
     ).fetchone()
-    return bool(row and row[0] != _database_signature(conn, period))
+    return not row or row[0] != _database_signature(conn, period)
+
+
+def _readiness_relation(conn: duckdb.DuckDBPyConnection, table: str, period: str) -> tuple[str, list[str]]:
+    """Project only gate inputs; never materialize attendance detail in Python."""
+    columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()} if _table_exists(conn, table) else set()
+    where, params = _period_clause(columns, period)
+    if not where or columns == {"_empty"}:
+        return "SELECT '' nip, '' date_key, 0 records WHERE false", []
+    nip = next((f'"{key}"' for key in ('nip', 'NIP') if key in columns), "NULL")
+    day = next((f'"{key}"' for key in ('tanggalKey', 'tanggal', 'tgl_finger') if key in columns), "NULL")
+    records = 'coalesce(TRY_CAST("jumlahRecord" AS BIGINT), 0)' if 'jumlahRecord' in columns else '0'
+    return (f'SELECT trim(coalesce(CAST({nip} AS VARCHAR), \'\')) nip, '
+            f'trim(coalesce(CAST({day} AS VARCHAR), \'\')) date_key, '
+            f'{records} records FROM "{table}"{where}', params)
 
 
 def validate_final_readiness(db_path: str, period: str) -> dict[str, Any]:
@@ -147,26 +163,28 @@ def validate_final_readiness(db_path: str, period: str) -> dict[str, Any]:
         return result
 
     with duckdb.connect(str(db_path), read_only=True) as conn:
-        daily = _rows(conn, "hitung_harian", period)
-        semifinal = _rows(conn, "anomali", period)
-        rekap = _rows(conn, "rekap_sdm", period)
-        if _table_exists(conn, "hitung_harian") and not any("bulan" == row[1] for row in conn.execute('PRAGMA table_info("hitung_harian")').fetchall()):
-            daily = _period_rows(_rows(conn, "hitung_harian"), period)
-        if _table_exists(conn, "anomali") and not any("bulan" == row[1] for row in conn.execute('PRAGMA table_info("anomali")').fetchall()):
-            semifinal = _period_rows(_rows(conn, "anomali"), period)
-        if _table_exists(conn, "rekap_sdm") and not any("bulan" == row[1] for row in conn.execute('PRAGMA table_info("rekap_sdm")').fetchall()):
-            rekap = _period_rows(_rows(conn, "rekap_sdm"), period)
+        daily_sql, daily_params = _readiness_relation(conn, "hitung_harian", period)
+        semifinal_sql, semifinal_params = _readiness_relation(conn, "anomali", period)
+        rekap_sql, rekap_params = _readiness_relation(conn, "rekap_sdm", period)
+        # Return one small row per employee, instead of all daily records.
+        daily = conn.execute(f'SELECT nip, count(*) FROM ({daily_sql}) GROUP BY nip', daily_params).fetchall()
+        semifinal = conn.execute(f'SELECT EXISTS(SELECT 1 FROM ({semifinal_sql}))', semifinal_params).fetchone()[0]
+        rekap = conn.execute(
+            f'SELECT nip, count(*), min(records) FROM ({rekap_sql}) GROUP BY nip', rekap_params,
+        ).fetchall()
         result["checks"]["harian_available"] = bool(daily)
         result["checks"]["semifinal_available"] = bool(semifinal)
         result["checks"]["rekap_available"] = bool(rekap)
 
-        daily_keys = [(_nip(row), _date_key(row)) for row in daily]
-        daily_dups = [key for key, count in Counter(daily_keys).items() if key[0] and count > 1]
+        daily_dups = conn.execute(
+            f"SELECT count(*) FROM (SELECT nip, date_key FROM ({daily_sql}) "
+            "WHERE nip <> '' GROUP BY nip, date_key HAVING count(*) > 1)", daily_params,
+        ).fetchone()[0]
         result["checks"]["harian_duplicates"] = bool(daily_dups)
         if not daily:
             result["blocking_reasons"].append("Hasil Hitung Harian belum tersedia.")
         if daily_dups:
-            result["blocking_reasons"].append(f"Ditemukan {len(daily_dups)} duplikat NIP/tanggal pada Hitung Harian.")
+            result["blocking_reasons"].append(f"Ditemukan {daily_dups} duplikat NIP/tanggal pada Hitung Harian.")
         if not semifinal:
             result["blocking_reasons"].append("Hasil Semi Final belum tersedia.")
 
@@ -175,21 +193,17 @@ def validate_final_readiness(db_path: str, period: str) -> dict[str, Any]:
         if not verified:
             result["blocking_reasons"].append("Verifikasi Semi Final belum tercatat di database.")
 
-        rekap_keys = [(_nip(row), str(row.get("bulan") or period)) for row in rekap]
-        rekap_dups = [key for key, count in Counter(rekap_keys).items() if not key[0] or count > 1]
+        rekap_dups = any(not nip or count > 1 for nip, count, _ in rekap)
         result["checks"]["rekap_duplicates"] = bool(rekap_dups)
         if not rekap:
             result["blocking_reasons"].append("Rekap SDM belum tersedia.")
         if rekap_dups:
             result["blocking_reasons"].append("Rekap SDM memiliki NIP kosong atau duplikat.")
 
-        daily_by_nip = Counter(_nip(row) for row in daily if _nip(row))
-        rekap_by_nip = Counter(_nip(row) for row in rekap if _nip(row))
-        mismatches = []
-        for nip in sorted(set(daily_by_nip) | set(rekap_by_nip)):
-            actual = next((int(row.get("jumlahRecord") or 0) for row in rekap if _nip(row) == nip), 0)
-            if daily_by_nip[nip] != actual:
-                mismatches.append((nip, daily_by_nip[nip], actual))
+        daily_by_nip = {nip: count for nip, count in daily if nip}
+        rekap_by_nip = {nip: records for nip, _, records in rekap if nip}
+        mismatches = [nip for nip in daily_by_nip.keys() | rekap_by_nip.keys()
+                      if daily_by_nip.get(nip, 0) != rekap_by_nip.get(nip, 0)]
         result["checks"]["rekap_consistent"] = bool(rekap) and not rekap_dups and not mismatches and set(daily_by_nip) == set(rekap_by_nip)
         if mismatches or set(daily_by_nip) != set(rekap_by_nip):
             result["blocking_reasons"].append(
@@ -209,48 +223,82 @@ def record_verification(db_path: str, period: str) -> dict[str, Any]:
     if not PERIOD_RE.fullmatch(str(period or "")):
         raise ValueError("Periode harus berformat YYYY-MM.")
     with duckdb.connect(str(db_path)) as conn:
-        if not _table_exists(conn, "hitung_harian"):
-            raise ValueError("Hasil Hitung Harian belum tersedia.")
-        daily_columns = {row[1] for row in conn.execute('PRAGMA table_info("hitung_harian")').fetchall()}
-        if not daily_columns or daily_columns == {"_empty"}:
-            raise ValueError("Hasil Hitung Harian belum tersedia.")
-        where, params = _period_clause(daily_columns, period)
-        daily_count = int(conn.execute(f'SELECT count(*) FROM "hitung_harian"{where}', params).fetchone()[0])
-        if not daily_count:
-            raise ValueError("Hasil Hitung Harian belum tersedia.")
-        nip_column = "nip" if "nip" in daily_columns else ("NIP" if "NIP" in daily_columns else None)
-        date_column = next((name for name in ("tanggalKey", "tanggal", "tgl_finger") if name in daily_columns), None)
-        if not nip_column or not date_column:
-            raise ValueError("Kolom NIP/tanggal pada Hitung Harian tidak lengkap.")
-        q_nip = f'"{nip_column}"'
-        q_date = f'"{date_column}"'
-        duplicates = int(conn.execute(
-            f'SELECT count(*) FROM (SELECT {q_nip}, {q_date}, count(*) n '
-            f'FROM "hitung_harian"{where} GROUP BY {q_nip}, {q_date} HAVING count(*) > 1)',
-            params,
-        ).fetchone()[0])
-        if duplicates:
-            raise ValueError("Masih ada duplikat NIP/tanggal pada Hitung Harian.")
-        # Semi Final is an approved snapshot of the canonical daily result.
-        # Materialize it inside DuckDB instead of uploading the same large row
-        # set from the browser a second time.
-        conn.execute('CREATE OR REPLACE TABLE "anomali" AS SELECT * FROM "hitung_harian"')
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS workflow_readiness_meta (period VARCHAR PRIMARY KEY, source_signature VARCHAR, updated_at TIMESTAMP)"
-        )
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute("CREATE TABLE IF NOT EXISTS workflow_flags (k VARCHAR PRIMARY KEY, verified INTEGER, updated_at TIMESTAMP)")
-        flag_columns = {row[1] for row in conn.execute('PRAGMA table_info("workflow_flags")').fetchall()}
-        if "verified" not in flag_columns:
-            conn.execute("ALTER TABLE workflow_flags ADD COLUMN verified INTEGER DEFAULT 0")
-        if "updated_at" not in flag_columns:
-            conn.execute("ALTER TABLE workflow_flags ADD COLUMN updated_at TIMESTAMP")
-        conn.execute(
-            "INSERT OR REPLACE INTO workflow_flags (k, verified, updated_at) VALUES (?, 1, ?)",
-            [f"semifinal:{period}", now],
-        )
-        conn.execute(
-            "INSERT OR REPLACE INTO workflow_readiness_meta (period, source_signature, updated_at) VALUES (?, ?, ?)",
-            [period, _database_signature(conn, period), now],
-        )
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            if not _table_exists(conn, "hitung_harian"):
+                raise ValueError("Hasil Hitung Harian belum tersedia.")
+            daily_columns = {row[1] for row in conn.execute('PRAGMA table_info("hitung_harian")').fetchall()}
+            if not daily_columns or daily_columns == {"_empty"}:
+                raise ValueError("Hasil Hitung Harian belum tersedia.")
+            where, params = _period_clause(daily_columns, period)
+            if not where:
+                raise ValueError("Kolom periode pada Hitung Harian tidak tersedia.")
+            daily_count = int(conn.execute(f'SELECT count(*) FROM "hitung_harian"{where}', params).fetchone()[0])
+            if not daily_count:
+                raise ValueError("Hasil Hitung Harian belum tersedia.")
+            nip_column = "nip" if "nip" in daily_columns else ("NIP" if "NIP" in daily_columns else None)
+            date_column = next((name for name in ("tanggalKey", "tanggal", "tgl_finger") if name in daily_columns), None)
+            if not nip_column or not date_column:
+                raise ValueError("Kolom NIP/tanggal pada Hitung Harian tidak lengkap.")
+            q_nip = f'"{nip_column}"'
+            q_date = f'"{date_column}"'
+            duplicates = int(conn.execute(
+                f'SELECT count(*) FROM (SELECT {q_nip}, {q_date}, count(*) n '
+                f'FROM "hitung_harian"{where} GROUP BY {q_nip}, {q_date} HAVING count(*) > 1)',
+                params,
+            ).fetchone()[0])
+            if duplicates:
+                raise ValueError("Masih ada duplikat NIP/tanggal pada Hitung Harian.")
+            # Semi Final is an approved snapshot of the canonical daily result.
+            # Materialize it inside DuckDB instead of uploading the same large row
+            # set from the browser a second time.
+            # Keep previously approved snapshots for every other period, including
+            # columns retained by older snapshots. DuckDB aligns the union by name.
+            if _table_exists(conn, "anomali"):
+                snapshot_columns = {row[1] for row in conn.execute('PRAGMA table_info("anomali")').fetchall()}
+                if snapshot_columns != {"_empty"}:
+                    snapshot_where, snapshot_params = _period_clause(snapshot_columns, period)
+                    if not snapshot_where:
+                        raise ValueError("Kolom periode pada Semi Final tidak tersedia.")
+                    predicate = snapshot_where.removeprefix(" WHERE ")
+                    if snapshot_columns == daily_columns:
+                        conn.execute(f'DELETE FROM "anomali"{snapshot_where}', snapshot_params)
+                        conn.execute(
+                            f'INSERT INTO "anomali" BY NAME SELECT * FROM "hitung_harian"{where}', params,
+                        )
+                    else:
+                        # Compatibility path for snapshots with an older schema.
+                        conn.execute(
+                            f'CREATE TEMP TABLE verified_snapshot AS '
+                            f'SELECT * FROM "anomali" WHERE NOT ({predicate}) OR ({predicate}) IS NULL '
+                            f'UNION ALL BY NAME SELECT * FROM "hitung_harian"{where}',
+                            snapshot_params + snapshot_params + params,
+                        )
+                        conn.execute('CREATE OR REPLACE TABLE "anomali" AS SELECT * FROM verified_snapshot')
+                else:
+                    conn.execute(f'CREATE OR REPLACE TABLE "anomali" AS SELECT * FROM "hitung_harian"{where}', params)
+            else:
+                conn.execute(f'CREATE TABLE "anomali" AS SELECT * FROM "hitung_harian"{where}', params)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS workflow_readiness_meta (period VARCHAR PRIMARY KEY, source_signature VARCHAR, updated_at TIMESTAMP)"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("CREATE TABLE IF NOT EXISTS workflow_flags (k VARCHAR PRIMARY KEY, verified INTEGER, updated_at TIMESTAMP)")
+            flag_columns = {row[1] for row in conn.execute('PRAGMA table_info("workflow_flags")').fetchall()}
+            if "verified" not in flag_columns:
+                conn.execute("ALTER TABLE workflow_flags ADD COLUMN verified INTEGER DEFAULT 0")
+            if "updated_at" not in flag_columns:
+                conn.execute("ALTER TABLE workflow_flags ADD COLUMN updated_at TIMESTAMP")
+            conn.execute(
+                "INSERT OR REPLACE INTO workflow_flags (k, verified, updated_at) VALUES (?, 1, ?)",
+                [f"semifinal:{period}", now],
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO workflow_readiness_meta (period, source_signature, updated_at) VALUES (?, ?, ?)",
+                [period, _database_signature(conn, period), now],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return {"status": "ok", "period": period, "verified": True, "rows": daily_count}

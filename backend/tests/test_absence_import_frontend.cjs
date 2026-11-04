@@ -191,7 +191,7 @@ async function main() {
     EVKIN.state.workflowMeta = {
       workflow_id:'backend-import-imp-1',total_row_counts:{raw_import:canonicalRows.length}
     };
-    EVKIN.state.importMode = 'csv_eabsensi';
+    EVKIN.state.importMode = currentSourceFormat;
     EVKIN.state.month = '2026-08';
     EVKIN.state.raw = [];
     EVKIN.state.data = [];
@@ -234,6 +234,25 @@ async function main() {
   await duplicatePanel.querySelector('#eabsensiUsePrevious').onclick();
   assert.ok(calls.some(item => item.path.endsWith('/duplicate-attempt/use-committed')),
     'Use Previous Result must verify the authoritative committed batch');
+
+  const excelPanel = new FakeElement();
+  EVKIN.importBackend.setMode(EVKIN.importBackend.modes.ROUTER);
+  EVKIN.importMod.render(excelPanel);
+  excelPanel.querySelector('#excelBackendFile').files = [{name:'absensi_sdm.xlsx'}];
+  const uploadsBeforeExcel = calls.filter(item => item.path.endsWith('/upload')).length;
+  await excelPanel.querySelector('#excelBackendUpload').onclick();
+  assert.equal(calls.filter(item => item.path.endsWith('/upload')).length, uploadsBeforeExcel + 1,
+    'Excel backend upload must invoke backend upload endpoint');
+  const excelUpload = calls.filter(item => item.path.endsWith('/upload')).slice(-1)[0];
+  assert.equal(excelUpload.body.values.get('source_format'), 'standard');
+  assert.equal(excelUpload.body.values.get('file').name, 'absensi_sdm.xlsx');
+  assert.match(excelPanel.querySelector('#backendImportResult').innerHTML, /Preview backend \(maks\. 50 baris\)/);
+
+  excelPanel.querySelector('#backendImportPeriod').value = '2026-08';
+  const loadCallsBeforeCommit = loadCalls;
+  await excelPanel.querySelector('#backendImportCommit').onclick();
+  assert.equal(loadCalls, loadCallsBeforeCommit + 1, 'Standard commit must reload canonical workflow');
+  assert.match(excelPanel.querySelector('#backendImportResult').innerHTML, /Lanjut ke Konfigurasi/);
 
   const source = fs.readFileSync('assets/js/import-backend.js','utf8');
   assert.doesNotMatch(source, /XLSX\.read|FileReader|EVKIN\.state\.raw\s*=/);
@@ -302,6 +321,12 @@ async function main() {
   assert.match(source, /Preview gagal dimuat/);
   assert.match(source, /Contoh error gagal dimuat/);
   assert.match(source, /Authority import backend tidak dapat diverifikasi/);
+  assert.match(source, /showImportModal/);
+  assert.match(source, /updateImportModal/);
+  assert.match(source, /closeImportModal/);
+  assert.match(source, /import-modal-dialog/);
+  assert.match(source, /import-modal-progress-bar/);
+  assert.match(source, /import-modal-stepper/);
 
   const exportSource = fs.readFileSync('assets/js/export-backend.js','utf8');
   assert.match(exportSource, /function apiErrorInfo\(payload, fallback\)/);

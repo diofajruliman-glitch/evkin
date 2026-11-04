@@ -47,6 +47,8 @@ function Test-EvkinBackendProcess($Connection, $ProcessInfo, [int]$ExpectedPort,
 
 if (-not $env:EVKIN_DUCKDB_PATH) { $env:EVKIN_DUCKDB_PATH = Join-Path $projectRoot 'backend\data\EVKIN_MASTER.duckdb' }
 if (-not $env:EVKIN_IMPORT_AUTHORITY) { $env:EVKIN_IMPORT_AUTHORITY = 'IMPORT_BACKEND_V1' }
+if (-not $env:EVKIN_ABSENCE_AUTHORITY) { $env:EVKIN_ABSENCE_AUTHORITY = 'PYTHON_CANONICAL' }
+if (-not $env:EVKIN_ABSENCE_CANONICAL_ENABLED) { $env:EVKIN_ABSENCE_CANONICAL_ENABLED = 'true' }
 $env:EVKIN_CSV_EABSENSI_SPECIAL_ENABLED = 'true'
 $port = if ($env:EVKIN_HTTP_PORT) { [int]$env:EVKIN_HTTP_PORT } else { 8000 }
 $env:EVKIN_HTTP_PORT = [string]$port

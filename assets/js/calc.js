@@ -167,6 +167,11 @@
     if (t.masuk === null || t.pulang === null) {
       res.statusLengkap = 'Tidak Lengkap';
       res.statusAbsensi = t.masuk === null ? 'LUPA_ABSEN_MASUK' : 'LUPA_ABSEN_PULANG';
+      if (metode === 'durasi' && jabatan.toLowerCase() === 'wali asuh') {
+        res.statusAbsensi = 'PERLU_VALIDASI';
+        res.flags.push('REKAMAN SHIFT TIDAK LENGKAP - CEK REKAP HARI KERJA');
+        return res;
+      }
       res.potTidakLengkap = cfg.potonganTidakLengkap;
       res.totalHarian = res.potTidakLengkap;
       res.flags.push('ABSENSI TIDAK LENGKAP');

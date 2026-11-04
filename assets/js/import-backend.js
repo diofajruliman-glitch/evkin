@@ -54,6 +54,179 @@
       <p><strong>Tahap:</strong> ${EVKIN.util.esc(csvPhase(status))}</p>${counters}</div>`;
   }
 
+  function showImportModal(options) {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function' || !document.body) return null;
+    let modal = document.getElementById('evkinImportModal');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'evkinImportModal';
+      modal.className = 'import-modal-overlay';
+      modal.setAttribute('role', 'dialog');
+      modal.setAttribute('aria-modal', 'true');
+      modal.setAttribute('aria-labelledby', 'importModalTitle');
+      document.body.appendChild(modal);
+    }
+    const filename = (options && options.filename) || 'File Import';
+    const isEabsensi = options && options.isEabsensi;
+    const title = isEabsensi ? 'Memproses CSV eAbsensi Backend' : 'Memproses Import Excel Backend';
+    modal.innerHTML = `
+      <div class="import-modal-dialog" data-testid="import-modal-dialog">
+        <div class="import-modal-header">
+          <div class="import-modal-badge-icon" id="importModalBadgeIcon">
+            <div class="import-spinner"></div>
+          </div>
+          <div class="import-modal-title-group">
+            <h3 id="importModalTitle">${EVKIN.util.esc(title)}</h3>
+            <p class="import-modal-filename" title="${EVKIN.util.esc(filename)}">${EVKIN.util.esc(filename)}</p>
+          </div>
+        </div>
+        <div class="import-modal-body">
+          <div class="import-modal-phase-row">
+            <span class="import-modal-phase-label" id="importModalPhase">Menyiapkan engine backend...</span>
+            <span class="import-modal-percent" id="importModalPercent">0%</span>
+          </div>
+          <div class="import-modal-progress-track">
+            <div class="import-modal-progress-bar" id="importModalBar" style="width: 0%"></div>
+          </div>
+          <div class="import-modal-stats-grid">
+            <div class="import-stat-item">
+              <span class="import-stat-lbl">Baris Diproses</span>
+              <span class="import-stat-val" id="importModalRows">Memulai...</span>
+            </div>
+            <div class="import-stat-item">
+              <span class="import-stat-lbl">Waktu Berjalan</span>
+              <span class="import-stat-val" id="importModalElapsed">0s</span>
+            </div>
+            <div class="import-stat-item">
+              <span class="import-stat-lbl">Engine</span>
+              <span class="import-stat-val">Python + DuckDB</span>
+            </div>
+          </div>
+          <div class="import-modal-stepper" id="importModalStepper">
+            <div class="import-step active" id="importStepUpload">
+              <span class="import-step-dot"></span>
+              <span class="import-step-text">Upload File</span>
+            </div>
+            <div class="import-step" id="importStepNorm">
+              <span class="import-step-dot"></span>
+              <span class="import-step-text">Normalisasi Data</span>
+            </div>
+            <div class="import-step" id="importStepInteg">
+              <span class="import-step-dot"></span>
+              <span class="import-step-text">Validasi Integritas</span>
+            </div>
+          </div>
+          <p class="import-modal-notice">
+            ⚡ Data diproses streaming di backend tanpa membebani browser. Jangan menutup tab selama proses berlangsung.
+          </p>
+        </div>
+        <div class="import-modal-footer" id="importModalFooter" style="display:none;">
+          <button type="button" class="btn btn-secondary" id="importModalDismiss">Tutup</button>
+        </div>
+      </div>
+    `;
+    modal.classList.add('visible');
+    const dismissBtn = modal.querySelector('#importModalDismiss');
+    if (dismissBtn) {
+      dismissBtn.onclick = () => closeImportModal();
+    }
+    return modal;
+  }
+
+  function updateImportModal(batch, startedAt) {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    const modal = document.getElementById('evkinImportModal');
+    if (!modal || !modal.classList.contains('visible')) return;
+    const status = (batch && batch.status) || 'UPLOADING';
+    const percentVal = Math.min(100, Math.max(0, Math.round((batch && batch.progress) || 0)));
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - (startedAt || Date.now())) / 1000));
+
+    let phaseText = csvPhase(status);
+    if (status === 'NORMALIZING') {
+      phaseText = 'Normalisasi baris & pairing absensi...';
+    } else if (status === 'VALIDATING') {
+      phaseText = 'Validasi struktur file & skema kolom...';
+    } else if (status === 'READY') {
+      phaseText = 'Selesai! Menyiapkan pratinjau rekap...';
+    } else if (status === 'FAILED') {
+      phaseText = 'Import gagal: ' + ((batch && batch.error_message) || 'Terjadi kesalahan');
+    }
+
+    const phaseEl = modal.querySelector('#importModalPhase');
+    if (phaseEl) phaseEl.textContent = phaseText;
+
+    const percentEl = modal.querySelector('#importModalPercent');
+    if (percentEl) percentEl.textContent = `${percentVal}%`;
+
+    const barEl = modal.querySelector('#importModalBar');
+    if (barEl) barEl.style.width = `${percentVal}%`;
+
+    const rowsEl = modal.querySelector('#importModalRows');
+    if (rowsEl) {
+      const staged = Number((batch && batch.staged_rows) || 0);
+      const total = Number((batch && batch.total_rows) || 0);
+      if (total > 0 && staged > 0 && total > staged) {
+        rowsEl.textContent = `${staged.toLocaleString('id-ID')} / ${total.toLocaleString('id-ID')}`;
+      } else if (staged > 0) {
+        rowsEl.textContent = `${staged.toLocaleString('id-ID')} baris`;
+      } else {
+        rowsEl.textContent = status === 'UPLOADING' ? 'Mengunggah...' : 'Memulai...';
+      }
+    }
+
+    const elapsedEl = modal.querySelector('#importModalElapsed');
+    if (elapsedEl) elapsedEl.textContent = `${elapsedSec}s`;
+
+    const stepUpload = modal.querySelector('#importStepUpload');
+    const stepNorm = modal.querySelector('#importStepNorm');
+    const stepInteg = modal.querySelector('#importStepInteg');
+    if (stepUpload && stepNorm && stepInteg) {
+      if (status === 'UPLOADING') {
+        stepUpload.className = 'import-step active';
+        stepNorm.className = 'import-step';
+        stepInteg.className = 'import-step';
+      } else if (status === 'STAGED' || status === 'VALIDATING' || status === 'NORMALIZING') {
+        stepUpload.className = 'import-step done';
+        stepNorm.className = 'import-step active';
+        stepInteg.className = 'import-step';
+      } else if (status === 'READY' || status === 'COMMITTED' || status === 'ALREADY_COMMITTED') {
+        stepUpload.className = 'import-step done';
+        stepNorm.className = 'import-step done';
+        stepInteg.className = 'import-step done';
+      }
+    }
+
+    const badge = modal.querySelector('#importModalBadgeIcon');
+    if (badge) {
+      if (status === 'READY' || status === 'COMMITTED' || status === 'ALREADY_COMMITTED') {
+        badge.innerHTML = '<span class="import-badge-success">✓</span>';
+        if (barEl) barEl.classList.add('success');
+      } else if (status === 'FAILED') {
+        badge.innerHTML = '<span class="import-badge-error">✕</span>';
+        if (barEl) barEl.classList.add('error');
+        const footer = modal.querySelector('#importModalFooter');
+        if (footer) footer.style.display = 'flex';
+      }
+    }
+  }
+
+  function closeImportModal(delayMs) {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+    const modal = document.getElementById('evkinImportModal');
+    if (!modal) return;
+    if (delayMs && delayMs > 0) {
+      setTimeout(() => {
+        if (modal) modal.classList.remove('visible');
+      }, delayMs);
+    } else {
+      modal.classList.remove('visible');
+    }
+  }
+
+  mod.showImportModal = showImportModal;
+  mod.updateImportModal = updateImportModal;
+  mod.closeImportModal = closeImportModal;
+
   async function request(path, options) {
     const response = await (backend.apiFetch || window.fetch)(apiUrl(path), options || {method:'GET'});
     const body = await response.json().catch(() => ({}));
@@ -66,17 +239,24 @@
     return body;
   }
 
-  async function hydrateCommittedEabsensiWorkflow(batch) {
+  async function hydrateCommittedWorkflow(batch) {
     if (typeof EVKIN.load !== 'function' || !await EVKIN.load()) {
       throw new Error('Data sudah tersimpan, tetapi workflow canonical gagal dimuat.');
     }
     const state = EVKIN.state || {};
     const workflowId = 'backend-import-' + batch.import_id;
     if (!state.workflowMeta || state.workflowMeta.workflow_id !== workflowId) {
-      throw new Error('Workflow aktif tidak cocok dengan import CSV eAbsensi yang baru di-commit.');
+      throw new Error('Workflow aktif tidak cocok dengan import yang baru di-commit.');
     }
-    if (state.importMode !== 'csv_eabsensi' || (batch.period && state.month !== batch.period)) {
-      throw new Error('Mode atau periode workflow aktif tidak cocok dengan hasil commit CSV eAbsensi.');
+    if ((batch.source_format && state.importMode !== batch.source_format) || (batch.period && state.month !== batch.period)) {
+      throw new Error('Mode atau periode workflow aktif tidak cocok dengan hasil commit.');
+    }
+    if (backend.calculationAuthority === 'PYTHON_CANONICAL') {
+      const stored = Number(state.workflowMeta.row_counts?.raw_import || 0);
+      if (!stored || (batch.valid_rows != null && stored !== Number(batch.valid_rows))) {
+        throw new Error('Jumlah data tersimpan tidak cocok dengan hasil impor.');
+      }
+      return true;
     }
     if (typeof EVKIN.loadCalculationInput !== 'function') {
       throw new Error('Hydration input kalkulasi canonical tidak tersedia.');
@@ -88,6 +268,10 @@
       throw new Error(`Hydration canonical tidak lengkap: ${state.data.length}/${expected} baris.`);
     }
     return true;
+  }
+
+  function hydrateCommittedEabsensiWorkflow(batch) {
+    return hydrateCommittedWorkflow(batch);
   }
 
   mod.refreshAuthority = async function () {
@@ -443,13 +627,13 @@
       ${previewError ? `<div class="alert error">Preview gagal dimuat: ${EVKIN.util.esc(previewError)}</div>` : ''}
       <div class="card"><h3>Preview backend (maks. 50 baris)</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Masuk</th><th>Pulang</th><th>Zona</th><th>Issue</th></tr></thead><tbody>${previewRows}</tbody></table></div></div>
       ${errorsError ? `<div class="alert error">Contoh error gagal dimuat: ${EVKIN.util.esc(errorsError)}</div>` : ''}
-      ${errors.rows && errors.rows.length ? `<div class="card"><h3>Contoh warning/blocker (maks. 50 baris)</h3><p class="alert warn">${errors.total.toLocaleString('id-ID')} row warning/blocker. Commit memerlukan konfirmasi eksplisit.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Severity</th><th>Alasan</th></tr></thead><tbody>${errorRows}</tbody></table></div></div>` : ''}
-      ${batch.status === 'READY' ? `<div class="actions-row"><label>Periode <select id="backendImportPeriod">${periodPlaceholder}${periods}</select></label><label><input type="checkbox" id="backendImportAcceptInvalid"> Saya memahami row invalid tidak dipromosikan</label><button class="btn btn-primary" id="backendImportCommit">Konfirmasi & Commit Import</button></div>` : ''}
-      ${batch.status === 'COMMITTED' ? (isEabsensi
-        ? (batch._workflowLoaded
-          ? '<div class="alert success">Import CSV eAbsensi tersimpan dan workflow berhasil dimuat.</div><div class="actions-row"><button class="btn btn-primary" id="backendImportContinue">Lanjut ke Konfigurasi</button></div>'
-          : '<div class="alert success">Import CSV eAbsensi sudah COMMITTED.</div>')
-        : '<div class="alert success">READY_FOR_CALCULATION. Muat ulang halaman untuk hydrate workflow canonical.</div>') : ''}`;
+      ${errors.rows && errors.rows.length ? `<div class="card"><h3>Contoh warning/blocker (maks. 50 baris)</h3><p class="alert warn">${errors.total.toLocaleString('id-ID')} baris perlu ditinjau. ${Number(batch.invalid_rows || 0) > 0
+        ? 'Konfirmasi hanya diperlukan untuk melanjutkan tanpa baris invalid.'
+        : 'Semua baris dapat diproses tanpa konfirmasi invalid. Jam masuk/pulang kosong saja bukan blocker.'}</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Severity</th><th>Alasan</th></tr></thead><tbody>${errorRows}</tbody></table></div></div>` : ''}
+      ${batch.status === 'READY' ? `<div class="actions-row"><label>Periode <select id="backendImportPeriod">${periodPlaceholder}${periods}</select></label>${Number(batch.invalid_rows || 0) > 0 ? '<label><input type="checkbox" id="backendImportAcceptInvalid"> Saya memahami baris invalid tidak ikut disimpan</label>' : ''}<button class="btn btn-primary" id="backendImportCommit">Simpan Impor</button></div>` : ''}
+      ${batch.status === 'COMMITTED' ? (batch._workflowLoaded
+        ? `<div class="alert success">Import ${isEabsensi ? 'CSV eAbsensi' : 'Excel/Standard'} tersimpan dan workflow berhasil dimuat.</div><div class="actions-row"><button class="btn btn-primary" id="backendImportContinue">Lanjut ke Konfigurasi</button></div>`
+        : `<div class="alert success">Import ${isEabsensi ? 'CSV eAbsensi' : 'Excel/Standard'} sudah COMMITTED.</div><div class="actions-row"><button class="btn btn-primary" id="backendImportContinue">Lanjut ke Konfigurasi</button></div>`) : ''}`;
     const commit = el.querySelector('#backendImportCommit');
     if (commit) commit.onclick = async () => {
       commit.disabled = true;
@@ -457,7 +641,7 @@
         const selectedPeriod = el.querySelector('#backendImportPeriod').value;
         if (!selectedPeriod) throw new Error('Pilih periode secara eksplisit sebelum commit.');
         const result = await mod.commit(batch.import_id, selectedPeriod,
-          el.querySelector('#backendImportAcceptInvalid').checked);
+          !!el.querySelector('#backendImportAcceptInvalid')?.checked);
         if (EVKIN.toast) EVKIN.toast('Import backend berhasil di-commit.', 'success');
         if (result.source_format === 'csv_eabsensi') {
           let loaded = false;
@@ -469,7 +653,14 @@
           }
           await renderBatch(el, {...result, _workflowLoaded:loaded}, loadNotice);
         } else {
-          await renderBatch(el, result);
+          let loaded = false;
+          let loadNotice = '';
+          try {
+            loaded = await hydrateCommittedWorkflow(result);
+          } catch (error) {
+            loadNotice = error.message;
+          }
+          await renderBatch(el, {...result, _workflowLoaded:loaded}, loadNotice);
         }
       } catch (error) {
         commit.disabled = false;
@@ -483,9 +674,15 @@
   function renderBackend(el) {
     el.innerHTML = `<div class="module-head"><div><h2>① Import Data</h2><p class="muted">Pilih jalur sumber secara eksplisit. Routing tidak menggunakan jabatan dan tidak memiliki fallback otomatis.</p></div></div>
       <div class="card"><h3>1. Import Excel Existing</h3>
-        <div class="alert info">IMPORT ENGINE: JavaScript Legacy / Excel Existing.</div>
-        <p class="muted">Buka workflow lama lengkap untuk XLS/XLSX/XLSM, termasuk preview serta pairing lintas hari/Wali.</p>
-        <button class="btn btn-secondary" id="openLegacyExcel">Buka Import Excel Existing</button></div>
+        <div class="alert info">IMPORT ENGINE: Python Backend / Standard (Excel Existing).</div>
+        <p class="muted">Proses cepat XLSX/XLSM/CSV via engine backend Python &amp; DuckDB tanpa freeze browser. Rekap &amp; hitung harian tetap 100% identik.</p>
+        <label for="excelBackendFile">Pilih File Excel (.xlsx, .xlsm) atau CSV</label>
+        <input type="file" id="excelBackendFile" accept=".xlsx,.xlsm,.csv">
+        <div class="actions-row">
+          <button class="btn btn-primary" id="excelBackendUpload">Proses Excel via Backend</button>
+          <button class="btn btn-secondary" id="openLegacyExcel">Buka Versi Browser Legacy (JavaScript Legacy / Excel Existing)</button>
+        </div>
+        <div id="excelBackendProgress" class="muted"></div></div>
       <div class="card"><h3>2. Import Absensi Wali</h3>
         <div class="alert info">IMPORT ENGINE: JavaScript Legacy / cross-day.</div>
         <p class="muted">Import Wali tetap menggunakan parser dan pairing legacy.</p>
@@ -500,31 +697,47 @@
         <label class="checkbox-row"><input type="checkbox" id="eabsensiCrossDay" ${mod.csvEabsensiEnabled ? '' : 'disabled'}> Aktifkan pairing lintas hari / shift malam</label>
         <button class="btn btn-primary" id="eabsensiCsvUpload" ${mod.csvEabsensiEnabled ? '' : 'disabled'}>Proses CSV eAbsensi</button>
         <div id="eabsensiCsvProgress" class="muted"></div></div>
-      <div class="card"><h3>4. Advanced / Experimental</h3>
-        <div class="alert warn">IMPORT ENGINE: Backend Import V1 / Standard.</div>
-        <p class="muted">CSV/Parquet non-eAbsensi menggunakan Standard Backend Import V1.</p>
-        <input type="file" id="backendImportFile" accept=".csv,.parquet">
-        <button class="btn btn-secondary" id="backendImportUpload">Upload & Validasi</button>
-        <div id="backendImportProgress" class="muted"></div></div>
       <div id="backendImportResult"></div>`;
-    el.querySelector('#backendImportUpload').onclick = async () => {
-      mod.setMode(IMPORT_MODES.STANDARD_BACKEND);
-      const button = el.querySelector('#backendImportUpload');
-      const file = el.querySelector('#backendImportFile').files[0];
-      if (!file) return EVKIN.toast && EVKIN.toast('Pilih file terlebih dahulu.', 'error');
-      button.disabled = true;
-      try {
-        const created = await mod.upload(file, {
-          operator:'operator', sourceFormat:'standard'
-        });
-        const batch = await mod.wait(created.import_id, current => {
-          el.querySelector('#backendImportProgress').textContent = `${current.status}: ${Math.round(current.progress || 0)}% — ${Number(current.staged_rows || 0).toLocaleString('id-ID')} row staged`;
-        });
-        await renderBatch(el, batch);
-      } catch (error) {
-        el.querySelector('#backendImportProgress').innerHTML = `<span class="err">${EVKIN.util.esc(error.message)}</span>`;
-      } finally { button.disabled = false; }
-    };
+    const excelUploadBtn = el.querySelector('#excelBackendUpload');
+    if (excelUploadBtn) {
+      excelUploadBtn.onclick = async () => {
+        mod.setMode(IMPORT_MODES.STANDARD_BACKEND);
+        const file = el.querySelector('#excelBackendFile') ? el.querySelector('#excelBackendFile').files[0] : null;
+        if (!file) return EVKIN.toast && EVKIN.toast('Pilih file Excel terlebih dahulu.', 'error');
+        if (/\.xls$/i.test(file.name)) {
+          if (EVKIN.toast) EVKIN.toast('File .xls format lama (Excel 97-2003) disarankan disimpan sebagai .xlsx untuk kecepatan maksimal, atau gunakan tombol browser legacy.', 'warn');
+        }
+        excelUploadBtn.disabled = true;
+        const progressEl = el.querySelector('#excelBackendProgress');
+        if (progressEl) progressEl.textContent = 'Mengunggah file ke backend...';
+        const startedAt = Date.now();
+        showImportModal({filename: file.name, isEabsensi: false});
+        updateImportModal({status: 'UPLOADING', progress: 5, staged_rows: 0, total_rows: 0}, startedAt);
+        try {
+          const created = await mod.upload(file, {
+            operator:'operator', sourceFormat:'standard'
+          });
+          updateImportModal(created, startedAt);
+          const batch = await mod.wait(created.import_id, current => {
+            if (progressEl) {
+              progressEl.textContent = `${current.status}: ${Math.round(current.progress || 0)}% — ${Number(current.staged_rows || 0).toLocaleString('id-ID')} row staged`;
+            }
+            updateImportModal(current, startedAt);
+          });
+          updateImportModal(batch, startedAt);
+          closeImportModal(600);
+          await renderBatch(el, batch);
+        } catch (error) {
+          if (progressEl) {
+            progressEl.innerHTML = `<span class="err">${EVKIN.util.esc(error.message)}</span>`;
+          }
+          updateImportModal({status: 'FAILED', error_message: error.message}, startedAt);
+          if (EVKIN.toast) EVKIN.toast('Import backend gagal: ' + error.message, 'error');
+        } finally {
+          excelUploadBtn.disabled = false;
+        }
+      };
+    }
     el.querySelector('#openLegacyExcel').onclick = () => renderLegacyExcel(el);
     const eabsensiButton = el.querySelector('#eabsensiCsvUpload');
     eabsensiButton.onclick = async () => {
@@ -538,17 +751,25 @@
       const startedAt = Date.now();
       let latestProgress = {status:'UPLOADING', filename:file.name, crossDay, startedAt};
       renderCsvProgress(el, latestProgress);
-      const elapsedTimer = setInterval(() => renderCsvProgress(el, latestProgress), 1000);
+      showImportModal({filename: file.name, isEabsensi: true});
+      updateImportModal(latestProgress, startedAt);
+      const elapsedTimer = setInterval(() => {
+        renderCsvProgress(el, latestProgress);
+        updateImportModal(latestProgress, startedAt);
+      }, 1000);
       try {
         const result = await mod.processCsvEabsensi(file, {
           operator:'operator', crossDay
         }, current => {
           latestProgress = {...current, filename:file.name, crossDay, startedAt};
           renderCsvProgress(el, latestProgress);
+          updateImportModal(latestProgress, startedAt);
         });
         if (result.status === 'ALREADY_COMMITTED') {
           latestProgress = {...result, filename:file.name, crossDay, startedAt};
           renderCsvProgress(el, latestProgress);
+          updateImportModal(latestProgress, startedAt);
+          closeImportModal(600);
           await renderEabsensiResult(el, result);
           return;
         }
@@ -557,18 +778,22 @@
         try {
           latestProgress = {...result, status:'HYDRATING', filename:file.name, crossDay, startedAt};
           renderCsvProgress(el, latestProgress);
+          updateImportModal(latestProgress, startedAt);
           workflowLoaded = await hydrateCommittedEabsensiWorkflow(result);
         } catch (error) {
           workflowLoadError = error.message;
         }
         latestProgress = {...result, status:'COMMITTED', filename:file.name, crossDay, startedAt};
         renderCsvProgress(el, latestProgress);
+        updateImportModal(latestProgress, startedAt);
+        closeImportModal(600);
         await renderEabsensiResult(el, result, {
           workflowLoaded,
           notice:workflowLoadError
         });
       } catch (error) {
         el.querySelector('#eabsensiCsvProgress').textContent = '';
+        updateImportModal({status: 'FAILED', error_message: error.message}, startedAt);
         if (error.batch) {
           await renderEabsensiResult(el, error.batch, {notice:error.code === 'MULTI_PERIOD_REQUIRES_SELECTION'
             ? 'File mencakup beberapa periode. Pilih satu periode untuk diproses.'

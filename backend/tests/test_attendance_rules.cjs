@@ -45,6 +45,23 @@ async function main() {
   await E.rekapMod.process({sync:false});
   assert.equal(E.state.rekap[0].hariKurang,0);
   assert.equal(E.state.rekap[0].total,0);
+  const shift = extra => ({jabatan:'Wali Asuh', ...extra});
+  const incompleteShift = calc('2026-08-03',shift({pulangMin:null}));
+  assert.equal(incompleteShift.statusLengkap,'Tidak Lengkap');
+  assert.equal(incompleteShift.totalHarian,0);
+  E.state.daily = [
+    incompleteShift,
+    calc('2026-08-02',shift({masukMin:null,pulangMin:360})), // Sunday still counts
+    calc('2026-08-04',shift({masukMin:null,pulangMin:null}))
+  ];
+  await E.rekapMod.process({sync:false});
+  assert.equal(E.state.rekap[0].hariAdaAbsensi,2);
+  assert.equal(E.state.rekap[0].total,0);
+  E.state.config.effectiveDaysManual = 3;
+  await E.rekapMod.process({sync:false});
+  assert.equal(E.state.rekap[0].hariKurang,1);
+  assert.equal(E.state.rekap[0].total,3);
+  E.state.config.effectiveDaysManual = 2;
   // Numeric strings restored from older snapshots must sum arithmetically.
   E.state.daily=[calc('2026-08-03'),calc('2026-08-04')].map(r=>({...r,potPulangCepat:'0.5',potTidakLengkap:'0'}));
   await E.rekapMod.process({sync:false});

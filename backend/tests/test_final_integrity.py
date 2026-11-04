@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import duckdb
 import pandas as pd
 import pytest
 from backend.final_integrity import final_manifest, assert_manifest, verify_final_xlsx
@@ -22,7 +23,9 @@ def test_manifest_preserves_duplicates_and_detects_nip_changes():
 def test_mismatch_never_publishes_excel(monkeypatch, tmp_path):
     setup_export(monkeypatch, tmp_path)
     rows = [dict(nip='001234567890123456', tukin=100, nominal=10, finalDibayar=90)]
-    monkeypatch.setattr(api, 'read_workflow_table_duckdb', lambda *args: pd.DataFrame(rows))
+    with duckdb.connect(api.DUCKDB_PATH) as db:
+        db.register('source', pd.DataFrame(rows))
+        db.execute('CREATE TABLE final_absensi AS SELECT * FROM source')
     with pytest.raises(ValueError, match='Validasi Final gagal'):
         api.run_export_job('mismatch', '2026-09', None, ['FINAL ABSENSI'], expected_final=final_manifest([]))
     assert not list(tmp_path.glob('*.xlsx'))

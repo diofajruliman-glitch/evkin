@@ -46,7 +46,7 @@
         <div class="dashboard-overview-main">
           <div class="dashboard-heading">
             <div>
-              <span class="dashboard-eyebrow">EVKIN Intelligence</span>
+              <span class="dashboard-eyebrow">Ruang kerja absensi</span>
               <h2>Pengolahan Tukin ${S.month ? U.monthLabel(S.month) : ''}</h2>
               <p class="dashboard-status ${hasData && (anomali + tidakLengkap) ? 'warning' : ''}">
                 <i data-lucide="${hasData && (anomali + tidakLengkap) ? 'triangle-alert' : 'sparkles'}"></i>
@@ -55,10 +55,10 @@
             </div>
             <div class="dashboard-tools">
               <button class="btn btn-primary btn-sm" id="gotoTukinBtn" title="Buka Pengelolaan Tukin (70/30)"><i data-lucide="calendar-range"></i><span>Kelola Tukin</span></button>
-              <button class="btn btn-danger btn-sm" id="deleteAbsensiBackendBtn" data-testid="delete-absensi-backend"><i data-lucide="trash-2"></i> Hapus Data Workflow</button>
               <button class="btn btn-ghost btn-sm" id="reconcileBtn" data-testid="reconcile-button" title="Rekonsiliasi"><i data-lucide="clipboard-check"></i><span>Rekonsiliasi</span></button>
               <button class="btn btn-ghost btn-sm" id="auditBtn" data-testid="audit-button" title="Audit Log"><i data-lucide="activity"></i><span>Audit Log</span></button>
               <details class="danger-menu"><summary class="btn btn-ghost btn-sm" title="Tindakan lainnya"><i data-lucide="ellipsis"></i></summary><div class="danger-menu-popover">
+              <button class="btn btn-danger btn-sm" id="deleteAbsensiBackendBtn" data-testid="delete-absensi-backend"><i data-lucide="trash-2"></i> Hapus Data Workflow</button>
                 <button class="btn btn-ghost btn-sm" id="dbResetBtn" data-testid="db-reset-button" title="Hanya membersihkan cache lokal; data server tidak berubah"><i data-lucide="database"></i> Bersihkan Cache Browser</button>
                 <button class="btn btn-danger btn-sm" id="backendWorkflowResetBtn" data-testid="backend-workflow-reset-button"><i data-lucide="server-cog"></i> Reset Database Workflow Backend</button>
                 <button class="btn btn-danger btn-sm" id="workflowResultsResetBtn"><i data-lucide="calculator"></i> Hapus Hasil Hitungan Workflow</button>

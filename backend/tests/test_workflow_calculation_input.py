@@ -243,6 +243,7 @@ def test_complete_next_day_attendance_has_zero_daily_penalties(workflow_db, monk
         ("SHORT_NIGHT", "Wali Asuh", 1380, 60, "2026-08-04", 0),
         ("DATED_NEXT_DAY", "Guru", 480, 600, "2026-08-04", 0),
         ("MISSING_OUT", "Guru", 1200, None, "2026-08-04", 3),
+        ("SHIFT_MISSING_OUT", "Wali Asuh", 1200, None, "2026-08-04", 0),
         ("MISSING_IN", "Guru", None, 240, "2026-08-04", 3),
         ("SAME_DAY_LATE", "Guru", 1200, 1320, "2026-08-03", 3),
         ("SAME_DAY_SHORT", "Wali Asuh", 480, 600, "2026-08-03", 3),
@@ -277,4 +278,4 @@ def test_complete_next_day_attendance_has_zero_daily_penalties(workflow_db, monk
         if out_date == "2026-08-04" and check_in is not None and check_out is not None:
             assert result[nip] == (0, 0, 0, 0, 0)
         if check_in is None or check_out is None:
-            assert result[nip][-1] == 3
+            assert result[nip][-1] == expected

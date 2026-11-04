@@ -861,6 +861,9 @@
             </div>
           </div>
         </div>
+        <div style="margin-top:10px; font-size:13px; color:#334155;">
+          <b>Periode:</b> <span class="pill blue" id="exportActivePeriodBadge">${U.esc(S.month ? U.monthLabel(S.month) : (S.workflowMeta && S.workflowMeta.periode ? S.workflowMeta.periode : 'Sesuai Data Master'))}</span>
+        </div>
       </div>
 
       <div class="card">
@@ -892,74 +895,116 @@
         if (button.disabled) return;
         button.disabled = true;
         try {
-        let expectedFinal;
+          let expectedFinal, calculationId;
 
-        if (backendReady) {
-          const authority = await EVKIN.exportBackend.getAbsenceAuthority();
-          const pythonCanonical = authority.authority === 'PYTHON_CANONICAL';
-          if (pythonCanonical) {
-            const latest = await EVKIN.exportBackend.getLatestAbsenceCalculation(S.month || '');
-            if (latest.status !== 'COMPLETED' || !latest.canonical) {
-              throw new Error('Final Absensi canonical backend belum siap untuk export.');
-            }
-            await EVKIN.exportBackend.hydrateCanonicalAbsence(S.month || '', latest.calculation_id);
+          // Resolve period in YYYY-MM
+          let period = S.month;
+          if (!period || !/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+            period = (S.workflowMeta && S.workflowMeta.periode) ||
+                     (S.importStats && S.importStats.months && S.importStats.months[0]) || '';
           }
-          // The user may enter Export from the sidebar, or change Final after
-          // an earlier export. Persist just the current Final results first.
-          if (!pythonCanonical && chosen.some(name => name.startsWith('FINAL')) && S.final.length) {
-            if (S.final.some(row => row.tukin == null || row.tukin === '')) {
-              EVKIN.toast('Final masih memiliki NIP tanpa Tukin bruto. Lengkapi Master SDM sebelum ekspor.', 'error');
-              return;
-            }
-            updateProgressUI(5, 'Menyimpan seluruh hasil Final terbaru...');
+          if (!period && backendReady) {
             try {
-              if (chosen.includes('FINAL ABSENSI')) expectedFinal = await EVKIN.exportBackend.finalManifest(S.final);
-              await EVKIN.syncBackendWorkflow(undefined, { finalOnly: true });
-            } catch (error) {
-              updateProgressUI(0, 'Hasil Final gagal disimpan. Coba ekspor lagi.');
-              EVKIN.toast('Export dibatalkan: ' + error.message, 'error');
+              const stateRes = await EVKIN.exportBackend.getWorkflowState();
+              if (stateRes && stateRes.meta && stateRes.meta.periode) {
+                period = stateRes.meta.periode;
+                S.month = period;
+              }
+            } catch (_) {}
+          }
+          if (!period || !/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) {
+            const now = new Date();
+            period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            S.month = period;
+          }
+
+          if (backendReady) {
+            updateProgressUI(5, 'Menyiapkan export melalui DuckDB master backend...');
+
+            // Check canonical calculation if available, but do NOT abort if not available
+            try {
+              const authority = await EVKIN.exportBackend.getAbsenceAuthority();
+              if (authority && authority.authority === 'PYTHON_CANONICAL') {
+                try {
+                  const latest = await EVKIN.exportBackend.getLatestAbsenceCalculation(period);
+                  if (latest && latest.status === 'COMPLETED' && latest.canonical) {
+                    calculationId = latest.published_calculation_id || latest.calculation_id;
+                  }
+                } catch (_) {}
+              }
+            } catch (_) {}
+
+            // Synchronize browser state to DuckDB master backend if needed
+            if (chosen.includes('FINAL ABSENSI') && S.final && S.final.length) {
+              const hasMissingTukin = S.final.some(row => row.tukin == null || row.tukin === '');
+              if (!hasMissingTukin) {
+                try {
+                  expectedFinal = await EVKIN.exportBackend.finalManifest(S.final);
+                } catch (_) {}
+              }
+              updateProgressUI(10, 'Menyinkronkan hasil Final ke DuckDB master...');
+              try {
+                await EVKIN.syncBackendWorkflow(undefined, { finalOnly: true });
+              } catch (syncErr) {
+                console.warn('Sync Final sebelum export:', syncErr);
+              }
+            } else if ((chosen.includes('HITUNG HARIAN') || chosen.includes('REKAP SDM')) && S.daily && S.daily.length) {
+              try {
+                await EVKIN.syncBackendWorkflow(undefined, { derivedOnly: true });
+              } catch (syncErr) {
+                console.warn('Sync derived sebelum export:', syncErr);
+              }
+            }
+
+            // Sync optional combinations if selected
+            const optional = {
+              'FINAL + SKP': 'final_skp',
+              'FINAL KOMBINASI': 'final_kombinasi',
+              'FINAL + SKP KOMBINASI': 'final_combined_skp'
+            };
+            const optionalSources = chosen.map(name => optional[name]).filter(Boolean);
+            if (optionalSources.length) {
+              try {
+                await EVKIN.syncBackendWorkflow(undefined, { sources: optionalSources });
+              } catch (_) {}
+            }
+
+            updateProgressUI(15, 'Membuat file Excel di backend DuckDB...');
+            try {
+              await EVKIN.exportBackend.startExportJob({
+                bulan: period,
+                unit: null,
+                sheetNames: chosen,
+                format: 'xlsx',
+                expectedFinal,
+                calculationId,
+                apiBase: EVKIN.exportBackend.apiBase
+              }, (progress, message) => {
+                const normalized = Math.max(0, Math.min(1, Number(progress) || 0));
+                updateProgressUI(15 + Math.round(normalized * 80), message || 'Membuat file Excel di backend...');
+              });
+
+              updateProgressUI(100, expectedFinal
+                ? `Validasi Excel lulus: ${expectedFinal.row_count} baris Final`
+                : 'Export backend selesai');
+              EVKIN.toast('✓ Export via backend berhasil', 'success');
+              EVKIN.auditMod.logDataExport('EVKIN_ABSENSI_' + period + '_backend.xlsx', chosen.length);
+              setTimeout(hideProgressUI, 1500);
+              return;
+            } catch (err) {
+              updateProgressUI(0, 'Export gagal: ' + (err.message || err));
+              EVKIN.toast('Export gagal: ' + (err.message || err), 'error');
               return;
             }
           }
-          updateProgressUI(10, 'Menyiapkan export Excel di backend...');
-          try {
-            // Workflow stages already synchronize their results to DuckDB. Do not
-            // resend the complete browser state here; large payloads made the UI
-            // appear stuck at 10% before the export job even started.
-            await EVKIN.exportBackend.startExportJob({
-              bulan: S.month || 'export',
-              unit: null,
-              sheetNames: chosen,
-              format: 'xlsx',
-              expectedFinal,
-              apiBase: EVKIN.exportBackend.apiBase
-            }, (progress, message) => {
-              const normalized = Math.max(0, Math.min(1, Number(progress) || 0));
-              updateProgressUI(10 + Math.round(normalized * 85), message || 'Membuat file Excel di backend...');
-            });
-            updateProgressUI(100, expectedFinal
-              ? `Validasi Excel lulus: ${expectedFinal.row_count} baris; bruto ${expectedFinal.gross}, potongan ${expectedFinal.deduction}, dibayar ${expectedFinal.paid}`
-              : 'Export backend selesai');
-            EVKIN.toast('✓ Export via backend berhasil', 'success');
-            EVKIN.auditMod.logDataExport('EVKIN_ABSENSI_' + (S.month || 'export') + '_backend.xlsx', chosen.length);
-            setTimeout(hideProgressUI, 1500);
-            return;
-          } catch (err) {
-            updateProgressUI(0, 'Export gagal: ' + (err.message || err) + '. Periksa Final lalu coba lagi.');
-            EVKIN.toast('Export gagal. File yang belum lolos validasi tidak diunduh.', 'error');
-            return;
-          }
-        }
 
-        if (EVKIN.exportBackend && EVKIN.exportBackend.calculationAuthority === 'PYTHON_CANONICAL') {
-          throw new Error('Export canonical memerlukan backend; fallback browser/IndexedDB dinonaktifkan.');
+          updateProgressUI(10, 'Membaca data dari browser untuk fallback export...');
+          mod.downloadSelected(chosen, false);
+          EVKIN.auditMod.logDataExport('EVKIN_ABSENSI_' + period + '_browser.xlsx', chosen.length);
+        } finally {
+          button.disabled = false;
         }
-
-        updateProgressUI(10, 'Membaca data dari browser untuk fallback export...');
-        mod.downloadSelected(chosen, false);
-        EVKIN.auditMod.logDataExport('EVKIN_ABSENSI_' + (S.month || 'export') + '_browser.xlsx', chosen.length);
-        } finally { button.disabled = false; }
       })();
-    };
+    }
   };
 })();

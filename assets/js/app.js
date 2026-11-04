@@ -81,6 +81,8 @@
     if (EVKIN.deletingAbsensi) throw new Error('Penghapusan workflow absensi sedang berlangsung.');
     if (!EVKIN.exportBackend || !EVKIN.exportBackend.enabled) return null;
     const S = EVKIN.state;
+    const canonical = EVKIN.harianMod?.usesBackend?.();
+    const optional = canonical && EVKIN.finalMod?.optionalRows;
     const skpRows = (S.finalSKP && S.finalSKP.rows) || [];
     const kombinasiRows = (S.finalKombinasi && S.finalKombinasi.rows) || [];
     const combined = S.finalCombinedSKP || {};
@@ -90,12 +92,12 @@
     const combinedSkpByNip = byNip(combined.skpRows || []);
     const eabsensiByNip = byNip(combined.eabsensiRows || []);
     const esdmByNip = byNip(combined.esdmRows || []);
-    const finalSkpData = (S.final || []).map((item) => {
+    const finalSkpData = optional ? optional('final_skp', S.final || []) : (S.final || []).map((item) => {
       const skp = skpByNip.get(String(item.nip)) || { skpPct: 0 };
       const skpNominal = Number(item.tukin || 0) * 0.70 * (Math.min(100, Number(skp.skpPct) || 0) / 100);
       return { ...item, skpPct: Number(skp.skpPct) || 0, nominalSKP: skpNominal, finalDibayarSKP: Number(item.tukin || 0) - Number(item.nominal || 0) - skpNominal };
     });
-    const kombinasiData = (S.final || []).map((item) => {
+    const kombinasiData = optional ? optional('final_kombinasi', S.final || []) : (S.final || []).map((item) => {
       const source = kombinasiByNip.get(String(item.nip)) || { eabs: 0, esdm: 0 };
       const candidates = [];
       if (combined.useApp !== false) candidates.push(Number(item.potPct) || 0);
@@ -105,7 +107,7 @@
       const nominal = Number(item.komponen || 0) * selectedPct / 100;
       return { ...item, aplikasiPct: Number(item.potPct) || 0, eabsensiPct: Number(source.eabs) || 0, esdmPct: Number(source.esdm) || 0, potonganTerpilihPct: selectedPct, nominalKombinasi: nominal, finalDibayarKombinasi: Number(item.tukin || 0) - nominal };
     });
-    const combinedData = (S.final || []).map((item) => {
+    const combinedData = optional ? optional('final_combined_skp', S.final || []) : (S.final || []).map((item) => {
       const skp = combinedSkpByNip.get(String(item.nip)) || { pct: 0, skpPct: 0 };
       const skpPct = Number(skp.skpPct ?? skp.pct) || 0;
       const candidates = [];
@@ -157,6 +159,9 @@
       if (Array.isArray(options.sources)) {
         const allowed = new Set(options.sources);
         for (const key of Object.keys(workflow)) if (!allowed.has(key)) delete workflow[key];
+      }
+      if (canonical) {
+        for (const source of ['raw_import','processed_data','daily_data','rekap_sdm','final_absensi']) delete workflow[source];
       }
       const result = await EVKIN.exportBackend.syncWorkflow(workflow, undefined, reportProgress);
       if (EVKIN.progress) EVKIN.progress({ title: 'Sinkronisasi data', percent: 100, message: 'Data berhasil disinkronkan.', state: 'done' });

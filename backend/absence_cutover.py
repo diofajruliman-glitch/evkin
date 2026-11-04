@@ -26,7 +26,6 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.absence_shadow_engine import (
-    BASELINE_GOLDEN_SHA256,
     BASELINE_ID,
     BASELINE_SOURCE_SHA256,
     _flatten,
@@ -36,15 +35,15 @@ from backend.absence_shadow_engine import (
     compute_rekap,
     detect_import_columns,
     normalize_raw_rows,
-    validate_golden_fingerprint,
     validate_source_fingerprint,
 )
 from backend.runtime_guard import DATABASE_GATE, assert_current_generation, current_reset_generation
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GOLDEN_PATH = ROOT / "backend/tests/fixtures/absence_js_golden_output_2026_09.json"
-PYTHON_CALCULATION_VERSION = "ABSENCE_PY_2026_09_V1"
+GOLDEN_PATH = ROOT / "backend/tests/fixtures/absence_cross_day_complete_output_2026_10.json"
+WORKBOOK_RULES_GOLDEN_SHA256 = "1aea4080d79e4e0767765a2cf5516858a6c704a4166d427979b29bc1832781be"
+PYTHON_CALCULATION_VERSION = "ABSENCE_PY_2026_11_V3"
 PERIOD_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ACTIVE_STATUSES = ("PENDING", "RUNNING")
 FINAL_STATUSES = (
@@ -91,7 +90,7 @@ def formula_source_fingerprint() -> str:
     python_engine = ROOT / "backend/absence_shadow_engine.py"
     material = {
         "baseline": BASELINE_ID,
-        "golden": BASELINE_GOLDEN_SHA256,
+        "golden": WORKBOOK_RULES_GOLDEN_SHA256,
         "sources": BASELINE_SOURCE_SHA256,
         "python_version": PYTHON_CALCULATION_VERSION,
         "python_engine_sha256": hashlib.sha256(python_engine.read_bytes()).hexdigest(),
@@ -103,16 +102,16 @@ def formula_source_fingerprint() -> str:
 
 def readiness_gate(repo_root: str | Path = ROOT) -> dict[str, Any]:
     source = validate_source_fingerprint(repo_root)
-    golden = validate_golden_fingerprint(GOLDEN_PATH)
+    golden_valid = hashlib.sha256(GOLDEN_PATH.read_bytes().replace(b"\r\n", b"\n")).hexdigest() == WORKBOOK_RULES_GOLDEN_SHA256
     return {
-        "ready": bool(source["valid"] and golden["valid"]),
+        "ready": bool(source["valid"] and golden_valid),
         "baseline": BASELINE_ID,
         "python_version": PYTHON_CALCULATION_VERSION,
-        "golden_fields": 8491,
+        "golden_fields": 8493,
         "real_world_fields": 1967751,
         "required_golden_coverage": ["WIB", "WITA", "WIT", "WALI", "CROSS_DAY"],
         "source_fingerprints_valid": source["valid"],
-        "golden_fingerprint_valid": golden["valid"],
+        "golden_fingerprint_valid": golden_valid,
         "differences": source["differences"],
     }
 
@@ -278,7 +277,14 @@ def load_canonical_source(
         raise AbsenceCalculationError("INVALID_PERIOD", "Periode wajib menggunakan format YYYY-MM")
     if not _table_exists(conn, "raw_import"):
         raise AbsenceCalculationError("RAW_IMPORT_NOT_AVAILABLE", "raw_import canonical tidak tersedia")
-    cursor = conn.execute('SELECT * FROM "raw_import" ORDER BY rowid')
+    config, workflow = _load_config(conn)
+    columns = _table_columns(conn, "raw_import")
+    if {"workflow_id", "tanggal"} <= set(columns):
+        cursor = conn.execute("""SELECT * FROM raw_import
+            WHERE workflow_id = ? AND substr(CAST(tanggal AS VARCHAR), 1, 7) = ?
+            ORDER BY rowid""", [workflow.get("workflow_id") or workflow.get("workflowId") or "default", period])
+    else:
+        cursor = conn.execute('SELECT * FROM "raw_import" ORDER BY rowid')
     headers = [item[0] for item in cursor.description]
     rows = [dict(zip(headers, values)) for values in cursor.fetchall()]
     column_map = detect_import_columns(headers)
@@ -288,7 +294,6 @@ def load_canonical_source(
     # Backend Import V1 promotes already-paired Wali rows into the canonical
     # raw contract. Preserve the legacy import-mode marker consumed by the
     # existing duration branches without changing any formula.
-    config, workflow = _load_config(conn)
     if str(workflow.get("importMode") or "").lower() == "wali":
         for record in records:
             record["sourceFormat"] = "wali"
@@ -298,7 +303,7 @@ def load_canonical_source(
     selected_indices = {int(str(record["_id"]).rsplit("-", 1)[-1]) for record in selected}
     selected_raw = [row for index, row in enumerate(rows) if index in selected_indices]
     active_period = str(workflow.get("month") or "").strip()
-    if active_period and active_period != period:
+    if "workflow_id" not in columns and active_period and active_period != period:
         raise AbsenceCalculationError(
             "WORKFLOW_PERIOD_MISMATCH",
             f"Workflow aktif {active_period}, bukan periode yang diminta {period}",
@@ -307,7 +312,6 @@ def load_canonical_source(
     source = {
         "period": period,
         "headers": headers,
-        "raw_rows": selected_raw,
         "records": selected,
         "config": config,
         "workflow": workflow,
@@ -509,6 +513,13 @@ def _replace_period(
             existing_period = lower.get(period_column.lower())
             if not existing_period and period_column == "monthKey":
                 existing_period = lower.get("bulan") or lower.get("tanggalkey")
+            if existing_period == period_column:
+                old_schema = dict((row[0], row[1]) for row in conn.execute(f'DESCRIBE "{table}"').fetchall())
+                new_schema = dict((row[0], row[1]) for row in conn.execute(f'DESCRIBE "{relation}"').fetchall())
+                if old_schema == new_schema:
+                    conn.execute(f'DELETE FROM "{table}" WHERE "{period_column}"=?', [period])
+                    conn.execute(f'INSERT INTO "{table}" BY NAME SELECT * FROM "{relation}"')
+                    return
             if existing_period:
                 period_expression = f'CAST("{existing_period}" AS VARCHAR)'
                 if existing_period.lower() == "tanggalkey":
@@ -575,7 +586,7 @@ class AbsenceCalculationService:
             "readiness": readiness_gate(),
         }
 
-    def submit(self, period: str, requested_by: str, rerun_reason: str = "") -> dict[str, Any]:
+    def submit(self, period: str, requested_by: str, rerun_reason: str = "", *, reuse: bool = False) -> dict[str, Any]:
         if not PERIOD_PATTERN.fullmatch(str(period or "")):
             raise AbsenceCalculationError("INVALID_PERIOD", "Periode wajib menggunakan format YYYY-MM")
         actor = str(requested_by or "").strip()
@@ -619,21 +630,22 @@ class AbsenceCalculationService:
                 """INSERT INTO absence_calculation_batch
                    (calculation_id,period,authority,engine,calculation_version,
                     reset_generation,source_formula_fingerprint,status,canonical,
-                    requested_by,rerun_reason,previous_calculation_id)
-                   VALUES (?,?,?,?,?,?,?,?,false,?,?,?)""",
+                    requested_by,rerun_reason,previous_calculation_id,timing_json)
+                   VALUES (?,?,?,?,?,?,?,?,false,?,?,?,?)""",
                 [calculation_id, period, authority.value, "PYTHON",
                  PYTHON_CALCULATION_VERSION, generation, formula_source_fingerprint(),
-                 "PENDING", actor, reason, previous[0] if previous else None],
+                 "PENDING", actor, reason, previous[0] if previous else None,
+                 json.dumps({"reuse_requested": reuse})],
             )
         return self.get(calculation_id)
 
-    def submit_background(self, period: str, requested_by: str, rerun_reason: str = "") -> dict[str, Any]:
-        batch = self.submit(period, requested_by, rerun_reason)
+    def submit_background(self, period: str, requested_by: str, rerun_reason: str = "", *, reuse: bool = False) -> dict[str, Any]:
+        batch = self.submit(period, requested_by, rerun_reason, reuse=reuse)
         _EXECUTOR.submit(self.run_batch, batch["calculation_id"])
         return batch
 
-    def calculate_sync(self, period: str, requested_by: str, rerun_reason: str = "") -> dict[str, Any]:
-        batch = self.submit(period, requested_by, rerun_reason)
+    def calculate_sync(self, period: str, requested_by: str, rerun_reason: str = "", *, reuse: bool = False) -> dict[str, Any]:
+        batch = self.submit(period, requested_by, rerun_reason, reuse=reuse)
         self.run_batch(batch["calculation_id"])
         return self.get(batch["calculation_id"])
 
@@ -684,15 +696,42 @@ class AbsenceCalculationService:
                         "daily": _read_period_rows(conn, "hitung_harian", period),
                         "rekap": _read_period_rows(conn, "rekap_sdm", period),
                         "final_absensi": _read_period_rows(conn, "final_absensi", period),
-                    }
+                    } if authority == CalculationAuthority.PYTHON_SHADOW else None
                     conn.execute(
                         """UPDATE absence_calculation_batch SET input_fingerprint=?,raw_count=?,
                            updated_at=now() WHERE calculation_id=?""",
                         [source["input_fingerprint"], len(source["records"]), calculation_id],
                     )
                     source_loading_ms += (time.perf_counter() - source_started) * 1000
+                    if authority == CalculationAuthority.PYTHON_CANONICAL and batch["timings"].get("reuse_requested"):
+                        prior = conn.execute("""
+                            SELECT b.calculation_id,b.daily_count,b.rekap_count,b.final_count
+                            FROM absence_calculation_canonical c
+                            JOIN absence_calculation_batch b USING(calculation_id)
+                            WHERE c.period=? AND c.input_fingerprint=? AND c.reset_generation=?
+                              AND b.source_formula_fingerprint=? AND b.status='COMPLETED' AND b.canonical
+                        """, [period, source["input_fingerprint"], batch["reset_generation"],
+                              batch["source_formula_fingerprint"]]).fetchone()
+                        if prior and all("calculation_id" in _table_columns(conn, table) and
+                                         conn.execute(f'SELECT count(*) FROM "{table}" WHERE calculation_id=?',
+                                                      [prior[0]]).fetchone()[0] == expected
+                                         for table, expected in zip(("hitung_harian", "rekap_sdm", "final_absensi"), prior[1:])):
+                            conn.execute("""
+                                UPDATE absence_calculation_batch SET status='COMPLETED',canonical=true,
+                                    daily_count=?,rekap_count=?,final_count=?,duration_ms=?,timing_json=?,
+                                    completed_at=now(),updated_at=now() WHERE calculation_id=?
+                            """, [*prior[1:], (time.perf_counter() - started_total) * 1000,
+                                  json.dumps({"reused_from": prior[0]}), calculation_id])
+                            return
+
             results = calculate_source(source)
+            source_workflow_id = (source["workflow"].get("workflow_id") or
+                                  source["workflow"].get("workflowId") or "default")
+            for name in ("daily", "rekap", "final_absensi"):
+                for row in results[name]:
+                    row["workflow_id"] = source_workflow_id
             results["timings"].update({
+                "source_workflow_id": source_workflow_id,
                 "source_loading_ms": source_loading_ms,
                 "gate_wait_ms": gate_wait_ms,
             })
@@ -750,6 +789,7 @@ class AbsenceCalculationService:
                             "SOURCE_CHANGED_DURING_CALCULATION",
                             "Sumber material berubah selama calculation; hasil tidak disimpan.",
                         )
+                    del current
                     conn.execute("BEGIN TRANSACTION")
                     try:
                         persistence_started = time.perf_counter()
@@ -811,6 +851,7 @@ class AbsenceCalculationService:
             result = {name[0]: _json_value(value) for name, value in zip(cursor.description, row)}
             timing = _parse_json(result.get("timing_json"), {})
             result["timings"] = timing
+            result["published_calculation_id"] = timing.get("reused_from") or calculation_id
             result["counts"] = {
                 "raw": int(result.get("raw_count") or 0),
                 "daily": int(result.get("daily_count") or 0),
@@ -885,6 +926,7 @@ def create_router(db_path_getter: Callable[[], str]) -> APIRouter:
                 str(payload.get("period") or payload.get("periode") or ""),
                 str(payload.get("actor") or payload.get("requested_by") or ""),
                 str(payload.get("reason") or payload.get("rerun_reason") or ""),
+                reuse=payload.get("reuse") is True,
             )
         except AbsenceCalculationError as exc:
             status = 409 if exc.code in {

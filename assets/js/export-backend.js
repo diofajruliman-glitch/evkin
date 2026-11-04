@@ -213,10 +213,10 @@
     return result;
   };
 
-  backend.startAbsenceCalculation = async function (period, actor, reason, apiBase = backend.apiBase) {
+  backend.startAbsenceCalculation = async function (period, actor, reason, apiBase = backend.apiBase, reuse = false) {
     const response = await fetch(new URL('/api/absence/calculate', normalizeApiBase(apiBase)).toString(), {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({period, actor, reason})
+      body:JSON.stringify({period, actor, reason, reuse})
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -243,7 +243,7 @@
   };
 
   backend.waitAbsenceCalculation = async function (calculationId, options = {}) {
-    const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 300000);
+    const timeoutMs = Math.max(1000, Number(options.timeoutMs) || 1800000);
     const intervalMs = Math.max(50, Number(options.intervalMs) || 500);
     const deadline = Date.now() + timeoutMs;
     const terminal = new Set(['COMPLETED','SHADOW_ONLY','FAILED','STALE_SOURCE','STALE_GENERATION']);
@@ -280,12 +280,12 @@
     if (authority.authority !== 'PYTHON_CANONICAL') {
       throw new Error('Authority aktif bukan PYTHON_CANONICAL.');
     }
-    const pending = await backend.startAbsenceCalculation(period, actor, reason, options.apiBase || backend.apiBase);
+    const pending = await backend.startAbsenceCalculation(period, actor, reason, options.apiBase || backend.apiBase, options.reuse === true);
     const completed = await backend.waitAbsenceCalculation(pending.calculation_id, options);
     if (completed.status !== 'COMPLETED' || !completed.canonical) {
       throw new Error('Calculation selesai tanpa hasil canonical.');
     }
-    const hydrated = await backend.hydrateCanonicalAbsence(period, completed.calculation_id);
+    const hydrated = options.hydrate === false ? null : await backend.hydrateCanonicalAbsence(period, completed.published_calculation_id || completed.calculation_id);
     return {batch:completed, hydrated};
   };
 
@@ -625,11 +625,21 @@
 
   EVKIN.exportBackend.createExportJob = async function (opts = {}) {
     const { bulan = '2026-08', unit = null, sheetNames = [], format = 'xlsx', apiBase = backend.apiBase } = opts;
-    const url = new URL('/api/jobs/export', apiBase);
+    const base = normalizeApiBase(apiBase);
+    if (!Number.isSafeInteger(backend.runtimeGeneration)) {
+      try {
+        const stateResp = await fetch(new URL('/api/workflow/state', base).toString(), { method: 'GET', cache: 'no-store' });
+        if (stateResp.ok) {
+          const gen = Number(stateResp.headers.get('X-EVKIN-Generation'));
+          if (Number.isSafeInteger(gen)) backend.runtimeGeneration = gen;
+        }
+      } catch (_) {}
+    }
+    const url = new URL('/api/jobs/export', base);
     const response = await fetch(url.toString(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bulan, unit, sheet_names: sheetNames, format, expected_final: opts.expectedFinal }),
+      body: JSON.stringify({ bulan, unit, sheet_names: sheetNames, format, expected_final: opts.expectedFinal, calculation_id: opts.calculationId }),
       signal: AbortSignal.timeout(30000)
     });
     if (!response.ok) {
@@ -642,7 +652,7 @@
   EVKIN.exportBackend.pollJob = async function (jobId, opts = {}) {
     const { apiBase = backend.apiBase, intervalMs = 2000, onProgress = null, timeoutMs = 60 * 60 * 1000 } = opts;
     const start = Date.now();
-    const url = new URL('/api/jobs/' + jobId, apiBase).toString();
+    const url = new URL('/api/jobs/' + jobId, normalizeApiBase(apiBase)).toString();
     while (true) {
       const resp = await fetch(url, { method: 'GET', cache: 'no-store', signal: AbortSignal.timeout(30000) });
       if (!resp.ok) {
@@ -662,7 +672,7 @@
 
   EVKIN.exportBackend.downloadJobResult = async function (jobId, opts = {}) {
     const { apiBase = backend.apiBase } = opts;
-    const url = new URL('/api/jobs/' + jobId + '/download', apiBase).toString();
+    const url = new URL('/api/jobs/' + jobId + '/download', normalizeApiBase(apiBase)).toString();
     const resp = await fetch(url, { method: 'GET' });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '<no body>');

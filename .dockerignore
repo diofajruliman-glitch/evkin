@@ -1,0 +1,11 @@
+*
+!Dockerfile
+!index.html
+!assets/
+!assets/**
+!backend/
+!backend/requirements.txt
+!backend/requirements-lock.txt
+!backend/*.py
+!backend/migrations/
+!backend/migrations/*.py

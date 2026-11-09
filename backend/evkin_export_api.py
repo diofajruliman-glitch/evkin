@@ -17,7 +17,7 @@ from backend.lazy_imports import lazy_module
 
 pd = lazy_module("pandas")
 import duckdb
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -156,7 +156,9 @@ if not _route_exists('/api/jobs/{job_id}/retry', 'POST'):
         mod = _resolve_self_module()
         return getattr(mod, 'api_retry_job')(job_id)
 
-DB_PATH = str(Path(__file__).resolve().parent / "evkin.db")
+STORAGE_DIR = Path(os.environ.get('EVKIN_STORAGE_DIR') or Path(__file__).resolve().parent)
+STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = str(STORAGE_DIR / 'evkin.db')
 # Use EVKIN_MASTER.duckdb in backend/data as the default master DB. Honor EVKIN_DUCKDB_PATH env var if set.
 DUCKDB_PATH = os.environ.get('EVKIN_DUCKDB_PATH') or str(Path(__file__).resolve().parent / 'data' / 'EVKIN_MASTER.duckdb')  # primary workflow DB for heavy transforms
 
@@ -936,12 +938,17 @@ def api_ping() -> dict:
 
 @app.get("/")
 @app.get("/index.html")
-def serve_frontend() -> FileResponse:
+def serve_frontend(request: Request) -> FileResponse:
     if not INDEX_FILE.is_file():
         raise HTTPException(status_code=404, detail="Frontend index.html not found")
     response = FileResponse(INDEX_FILE, media_type="text/html; charset=utf-8")
     key = configured_api_key()
-    if key:
+    if (
+        key
+        and request.client
+        and request.client.host in {'127.0.0.1', '::1'}
+        and request.url.hostname in {'127.0.0.1', '::1', 'localhost'}
+    ):
         response.set_cookie(key="evkin_local_api_key", value=key, samesite="strict", httponly=False)
     return response
 
@@ -1861,7 +1868,7 @@ def seed_demo_data() -> dict:
 import tempfile
 import os
 
-EXPORT_DIR = str(Path(__file__).resolve().parent / 'exports')
+EXPORT_DIR = str(STORAGE_DIR / 'exports')
 os.makedirs(EXPORT_DIR, exist_ok=True)
 
 

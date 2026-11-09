@@ -143,3 +143,20 @@ def test_primary_evkin_app_keeps_health_public_and_info_protected(monkeypatch):
     assert client.get("/api/info", headers={API_KEY_HEADER: "wrong"}).status_code == 401
     assert client.get("/api/info", headers={API_KEY_HEADER: "unit-test-key"}).status_code == 200
     assert client.get("/api/info", cookies={"evkin_local_api_key": "unit-test-key"}).status_code == 200
+
+
+def test_frontend_only_bootstraps_the_api_key_on_loopback(monkeypatch):
+    from backend.evkin_export_api import app
+
+    monkeypatch.setenv("EVKIN_API_KEY", "unit-test-key")
+    for path in ("/", "/index.html"):
+        for host, peer in (("evkin.example", "127.0.0.1"), ("localhost", "192.0.2.10")):
+            client = TestClient(app, base_url=f"http://{host}", client=(peer, 43210))
+            response = client.get(path)
+            assert response.status_code == 200
+            assert "set-cookie" not in response.headers
+            assert client.get("/api/info").status_code == 401
+
+    local = TestClient(app, base_url="http://localhost", client=("127.0.0.1", 43210))
+    assert local.get("/").cookies.get("evkin_local_api_key") == "unit-test-key"
+    assert local.get("/api/info").status_code == 200

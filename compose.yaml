@@ -1,0 +1,44 @@
+services:
+  evkin:
+    build: .
+    restart: unless-stopped
+    environment:
+      EVKIN_API_KEY: ${EVKIN_API_KEY:?Set a random API key in .env}
+      EVKIN_ALLOWED_ORIGINS: https://${EVKIN_HOST:?Set the public DNS hostname in .env}
+      EVKIN_STORAGE_DIR: /var/lib/evkin
+      EVKIN_DUCKDB_PATH: /var/lib/evkin/EVKIN_MASTER.duckdb
+      EVKIN_IMPORT_AUTHORITY: IMPORT_BACKEND_V1
+      EVKIN_ABSENCE_AUTHORITY: PYTHON_CANONICAL
+      EVKIN_ABSENCE_CANONICAL_ENABLED: 'true'
+      EVKIN_CSV_EABSENSI_SPECIAL_ENABLED: 'true'
+    volumes:
+      - evkin-data:/var/lib/evkin
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      evkin:
+        condition: service_healthy
+    environment:
+      EVKIN_HOST: ${EVKIN_HOST:?Set the public DNS hostname in .env}
+      EVKIN_API_KEY: ${EVKIN_API_KEY:?Set a random API key in .env}
+      EVKIN_OPERATOR_HASH: ${EVKIN_OPERATOR_HASH:?Set the Caddy password hash in .env}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  evkin-data:
+  caddy-data:
+  caddy-config:

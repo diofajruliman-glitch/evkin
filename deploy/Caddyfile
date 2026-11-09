@@ -1,0 +1,22 @@
+{$EVKIN_HOST} {
+	header {
+		Cache-Control "no-store"
+		X-Frame-Options "DENY"
+	}
+
+	@foreign_write {
+		not method GET HEAD OPTIONS
+		not header Origin https://{$EVKIN_HOST}
+	}
+
+	route {
+		basic_auth {
+			operator {$EVKIN_OPERATOR_HASH}
+		}
+		respond @foreign_write 403
+		reverse_proxy evkin:8000 {
+			header_up -Authorization
+			header_up X-EVKIN-API-Key {$EVKIN_API_KEY}
+		}
+	}
+}

@@ -21,6 +21,8 @@ browser dan **backend lokal DuckDB** untuk menyimpan data dan hasil perhitungan.
    - Library Excel (SheetJS) dan ikon (Lucide) sudah **dibundel offline** di folder `assets/vendor/`.
 5. Konfigurasi dan hasil workflow disimpan di **DuckDB backend**. Refresh memuat kembali state dari backend.
 
+Untuk akses online dengan server terpisah, lihat [panduan hosting gratis EVKIN](docs/HOSTING_GRATIS.md).
+
 ### Setup Python reproducible
 
 Gunakan Python 3.14 dan environment lokal terpisah:

@@ -31,6 +31,8 @@ async function main() {
   let multiPeriodReady = false;
   let currentSourceFormat = 'standard';
   let duplicateUpload = false;
+  let showImportIssues = false;
+  let sourceOnlyRows = 0;
   const response = body => ({ok:true,status:200,json:async()=>body});
   const apiFetch = async (url, options={}) => {
     const path = new URL(url).pathname;
@@ -64,14 +66,19 @@ async function main() {
       nip:'NIP-1',nama:'Pegawai UAT',tanggal:'2026-08-01',jam_masuk:'07:00:00',
       jam_pulang:'16:00:00',error_codes:[]
     }]});
-    if (path.endsWith('/imp-1/errors')) return response({rows:[],total:0});
+    if (path.endsWith('/imp-1/errors')) return response(showImportIssues ? {rows:[{
+      source_row:61,nip:'NEEDS-DATE',tanggal:null,severity:'BLOCKER',
+      error_codes:['INVALID_DATE','MISSING_CHECK_IN','MISSING_CHECK_OUT']
+    }],total:61} : {rows:[],total:0});
     if (path.endsWith('/imp-1')) {
       poll += 1;
       return response(poll === 1 ? {import_id:'imp-1',status:'NORMALIZING',progress:50} : {
         import_id:'imp-1',status:'READY',progress:100,
         period:multiPeriodReady ? null : '2026-08',
         periods:multiPeriodReady ? ['2026-08','2026-09'] : ['2026-08'],
-        source_format:currentSourceFormat
+        source_format:currentSourceFormat,
+        invalid_rows:showImportIssues ? 1 : 0, invalid_date_rows:showImportIssues ? 1 : 0,
+        non_attendance_rows:sourceOnlyRows
       });
     }
     throw new Error('Unexpected ' + path);
@@ -236,6 +243,7 @@ async function main() {
     'Use Previous Result must verify the authoritative committed batch');
 
   const excelPanel = new FakeElement();
+  showImportIssues = true;
   EVKIN.importBackend.setMode(EVKIN.importBackend.modes.ROUTER);
   EVKIN.importMod.render(excelPanel);
   excelPanel.querySelector('#excelBackendFile').files = [{name:'absensi_sdm.xlsx'}];
@@ -247,6 +255,13 @@ async function main() {
   assert.equal(excelUpload.body.values.get('source_format'), 'standard');
   assert.equal(excelUpload.body.values.get('file').name, 'absensi_sdm.xlsx');
   assert.match(excelPanel.querySelector('#backendImportResult').innerHTML, /Preview backend \(maks\. 50 baris\)/);
+  const issueHtml = excelPanel.querySelector('#backendImportResult').innerHTML;
+  assert.match(issueHtml, /1 baris blocker tidak dapat disimpan sebelum diperbaiki/);
+  assert.match(issueHtml, /60 baris peringatan tetap dapat disimpan/);
+  assert.match(issueHtml, /Tanggal absensi kosong atau tidak valid \(INVALID_DATE\)/);
+  assert.match(issueHtml, /kolom Bulan dan Tahun saja belum cukup/);
+  assert.match(issueHtml, /Batas 50 baris hanya untuk tampilan contoh; seluruh baris tetap diperiksa/);
+  assert.match(issueHtml, /baris blocker tidak ikut disimpan/);
 
   excelPanel.querySelector('#backendImportPeriod').value = '2026-08';
   const loadCallsBeforeCommit = loadCalls;
@@ -254,12 +269,28 @@ async function main() {
   assert.equal(loadCalls, loadCallsBeforeCommit + 1, 'Standard commit must reload canonical workflow');
   assert.match(excelPanel.querySelector('#backendImportResult').innerHTML, /Lanjut ke Konfigurasi/);
 
+  showImportIssues = false;
+  sourceOnlyRows = 242;
+  EVKIN.state.importStats = {totalRaw:2,totalRecord:1,nonAttendanceRows:1};
+  EVKIN.loadCalculationInput = async () => {
+    EVKIN.state.raw = canonicalRows;
+    EVKIN.state.data = canonicalRows.slice(0,1);
+    return EVKIN.state.data;
+  };
+  await excelPanel.querySelector('#excelBackendUpload').onclick();
+  assert.match(excelPanel.querySelector('#backendImportResult').innerHTML,
+    /242 baris tanpa tanggal dan jam tetap disimpan sebagai data sumber, tidak dihitung sebagai hadir/);
+  excelPanel.querySelector('#backendImportPeriod').value = '2026-08';
+  await excelPanel.querySelector('#backendImportCommit').onclick();
+  assert.match(excelPanel.querySelector('#backendImportResult').innerHTML, /workflow berhasil dimuat/,
+    'Raw source-only rows must not prevent successful hydration after commit');
+
   const source = fs.readFileSync('assets/js/import-backend.js','utf8');
   assert.doesNotMatch(source, /XLSX\.read|FileReader|EVKIN\.state\.raw\s*=/);
   assert.match(source, /Preview backend \(maks\. 50 baris\)/);
   assert.doesNotMatch(source, /backendImportPeriodInput/);
   assert.doesNotMatch(source, /id="backendImportFormat"/);
-  assert.match(source, /4\. Advanced \/ Experimental/);
+  assert.doesNotMatch(source, /4\. Advanced \/ Experimental/);
   assert.match(source, /Import Excel Existing/);
   assert.match(source, /JavaScript Legacy \/ Excel Existing/);
   assert.match(source, /return EVKIN\.importMod\.processFile\(file/);
@@ -273,8 +304,8 @@ async function main() {
   assert.match(source, /COMMITTING:'Menyimpan ke DuckDB'/);
   assert.match(source, /HYDRATING:'Memuat ulang workflow'/);
   assert.match(source, /mod\.csvProcessing/);
-  assert.match(source, /IMPORT ENGINE: Backend Import V1 \/ Standard/);
-  assert.match(source, /accept="\.csv,\.parquet"/);
+  assert.match(source, /IMPORT ENGINE: Python Backend \/ Standard \(Excel Existing\)/);
+  assert.match(source, /accept="\.xlsx,\.xlsm,\.csv"/);
   assert.match(source, /setAttribute\('accept', '\.xlsx,\.xlsm,\.xls'\)/);
   assert.match(source, /function renderLegacyExcel\(el\)/);
   assert.match(source, /legacyRender\(el\)/);
@@ -288,7 +319,6 @@ async function main() {
   assert.match(source, /IMPORT ENGINE: Python Backend \/ CSV_EABSENSI_SPECIAL/);
   assert.match(source, /2\. Import Absensi Wali/);
   assert.match(source, /3\. Import CSV eAbsensi/);
-  assert.match(source, /4\. Advanced \/ Experimental/);
   assert.match(source, /sourceFormat:'csv_eabsensi'/);
   assert.match(source, /sourceFormat:'standard'/);
   assert.match(source, /accept="\.csv,text\/csv"/);
@@ -338,9 +368,9 @@ async function main() {
   assert.match(launcherSource, /api\/absence-import\/authority/);
   assert.match(launcherSource, /Import CSV eAbsensi aktif/);
   const htmlSource = fs.readFileSync('index.html','utf8');
-  assert.match(htmlSource, /state\.js\?v=20260930-csv-workflow-handoff-v1/,
+  assert.match(htmlSource, /state\.js\?v=20261105-source-retention-v1/,
     'The browser must fetch the CSV workflow hydration change after a refresh');
-  assert.match(htmlSource, /import-backend\.js\?v=20260930-csv-workflow-handoff-v1/,
+  assert.match(htmlSource, /import-backend\.js\?v=20261105-blocker-preview-v1/,
     'The browser must fetch the updated import UI instead of a cached version');
   console.log('Backend import frontend authority/upload/poll/commit: PASS');
 }

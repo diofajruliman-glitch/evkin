@@ -201,12 +201,12 @@
   function refreshLoadedImportStats() {
     const loadedMonths = [...new Set(state.data.filter(row => row && row.tanggal && !row.deleted)
       .map(row => row.tanggal.monthKey).filter(Boolean))].sort();
-    const totalRecord = Number(state.importStats && state.importStats.totalRecord ||
-      state.workflowMeta.total_row_counts.processed_data || state.data.length ||
-      state.workflowMeta.total_row_counts.raw_import || 0);
+    const totalRecord = Number(state.importStats?.totalRecord ??
+      (state.workflowMeta.total_row_counts.processed_data || state.data.length ||
+      state.workflowMeta.total_row_counts.raw_import || 0));
     const complete = state.data.length >= totalRecord;
     const savedMonths = Array.isArray(state.importStats && state.importStats.months) ? state.importStats.months : [];
-    const months = complete ? loadedMonths : (savedMonths.length ? savedMonths : loadedMonths);
+    const months = complete && loadedMonths.length ? loadedMonths : (savedMonths.length ? savedMonths : loadedMonths);
     if (!months.includes(state.month)) state.month = months[0] || state.month || '';
     state.importStats = {...(state.importStats || {}), months,
       totalRecord,
@@ -322,7 +322,7 @@
       if (rows.length !== persisted) throw new Error(`Hydration input kalkulasi tidak lengkap: ${rows.length}/${persisted} row.`);
       const restored = state.importMode === 'wali' && EVKIN.waliImportMod && EVKIN.waliImportMod.restoreRecords
         ? EVKIN.waliImportMod.restoreRecords(rows) : EVKIN.importMod.restoreRecords(rows);
-      const expectedCalculation = Number(manifest && manifest.expected_calculation_rows || restored.length);
+      const expectedCalculation = Number(manifest?.expected_calculation_rows ?? restored.length);
       if (restored.length !== expectedCalculation) {
         throw new Error(`Normalisasi input kalkulasi tidak lengkap: ${restored.length}/${expectedCalculation} record.`);
       }
@@ -460,7 +460,7 @@
       state.importMode = workflow.importMode || 'standard';
       const totals = state.workflowMeta.total_row_counts;
       state.importStats = {...(workflow.importStats || {}), months,
-        totalRecord:Number(workflow.importStats && workflow.importStats.totalRecord || totals.raw_import || 0),
+        totalRecord:Number(workflow.importStats?.totalRecord ?? totals.raw_import ?? 0),
         totalRaw:Number(workflow.importStats && workflow.importStats.totalRaw || totals.raw_import || 0)};
       state.semifinalVerified = workflow.semifinalVerified === true && Number(totals.daily_data || 0) > 0;
       if (EVKIN.exportBackend && EVKIN.exportBackend.getWorkflowFlags && state.month) {

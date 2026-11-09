@@ -3958,10 +3958,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 0.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 0.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -3983,18 +3983,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 0.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 0.5,
+        "total": 0.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 0.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4004,10 +4004,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 3000,
+        "finalDibayar": 1997000
       },
       "final_skp": {
         "nip": "DUR003",
@@ -4015,13 +4015,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1997000
       },
       "final_combined": {
         "nip": "DUR003",
@@ -4029,17 +4029,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
+        "potonganAbsensiPct": 0.5,
+        "nominalPotonganAbsensi": 3000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.15,
+        "totalNominalPotongan": 3000,
+        "finalDibayarKombinasiSKP": 1997000
       }
     },
     {
@@ -4085,10 +4085,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 0.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 0.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4110,18 +4110,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 0.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 0.5,
+        "total": 0.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 0.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4131,10 +4131,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 3000,
+        "finalDibayar": 1997000
       },
       "final_skp": {
         "nip": "DUR004",
@@ -4142,13 +4142,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1997000
       },
       "final_combined": {
         "nip": "DUR004",
@@ -4156,17 +4156,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
+        "potonganAbsensiPct": 0.5,
+        "nominalPotonganAbsensi": 3000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.15,
+        "totalNominalPotongan": 3000,
+        "finalDibayarKombinasiSKP": 1997000
       }
     },
     {
@@ -4212,10 +4212,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 0.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 0.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4237,18 +4237,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 0.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 0.5,
+        "total": 0.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 0.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4258,10 +4258,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 3000,
+        "finalDibayar": 1997000
       },
       "final_skp": {
         "nip": "DUR005",
@@ -4269,13 +4269,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1997000
       },
       "final_combined": {
         "nip": "DUR005",
@@ -4283,17 +4283,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 0.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 3000,
+        "finalDibayar": 1997000,
+        "potonganAbsensiPct": 0.5,
+        "nominalPotonganAbsensi": 3000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.15,
+        "totalNominalPotongan": 3000,
+        "finalDibayarKombinasiSKP": 1997000
       }
     },
     {
@@ -4339,10 +4339,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4364,18 +4364,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1,
+        "total": 1,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4385,10 +4385,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 6000,
+        "finalDibayar": 1994000
       },
       "final_skp": {
         "nip": "DUR006",
@@ -4396,13 +4396,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1994000
       },
       "final_combined": {
         "nip": "DUR006",
@@ -4410,17 +4410,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
+        "potonganAbsensiPct": 1,
+        "nominalPotonganAbsensi": 6000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.3,
+        "totalNominalPotongan": 6000,
+        "finalDibayarKombinasiSKP": 1994000
       }
     },
     {
@@ -4466,10 +4466,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4491,18 +4491,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1,
+        "total": 1,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4512,10 +4512,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 6000,
+        "finalDibayar": 1994000
       },
       "final_skp": {
         "nip": "DUR007",
@@ -4523,13 +4523,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1994000
       },
       "final_combined": {
         "nip": "DUR007",
@@ -4537,17 +4537,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
+        "potonganAbsensiPct": 1,
+        "nominalPotonganAbsensi": 6000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.3,
+        "totalNominalPotongan": 6000,
+        "finalDibayarKombinasiSKP": 1994000
       }
     },
     {
@@ -4593,10 +4593,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4618,18 +4618,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1,
+        "total": 1,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4639,10 +4639,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 6000,
+        "finalDibayar": 1994000
       },
       "final_skp": {
         "nip": "DUR008",
@@ -4650,13 +4650,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1994000
       },
       "final_combined": {
         "nip": "DUR008",
@@ -4664,17 +4664,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 6000,
+        "finalDibayar": 1994000,
+        "potonganAbsensiPct": 1,
+        "nominalPotonganAbsensi": 6000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.3,
+        "totalNominalPotongan": 6000,
+        "finalDibayarKombinasiSKP": 1994000
       }
     },
     {
@@ -4720,10 +4720,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4745,18 +4745,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1.5,
+        "total": 1.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4766,10 +4766,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 9000,
+        "finalDibayar": 1991000
       },
       "final_skp": {
         "nip": "DUR009",
@@ -4777,13 +4777,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1991000
       },
       "final_combined": {
         "nip": "DUR009",
@@ -4791,17 +4791,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
+        "potonganAbsensiPct": 1.5,
+        "nominalPotonganAbsensi": 9000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.45,
+        "totalNominalPotongan": 9000,
+        "finalDibayarKombinasiSKP": 1991000
       }
     },
     {
@@ -4847,10 +4847,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4872,18 +4872,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1.5,
+        "total": 1.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -4893,10 +4893,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 9000,
+        "finalDibayar": 1991000
       },
       "final_skp": {
         "nip": "DUR010",
@@ -4904,13 +4904,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1991000
       },
       "final_combined": {
         "nip": "DUR010",
@@ -4918,17 +4918,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
+        "potonganAbsensiPct": 1.5,
+        "nominalPotonganAbsensi": 9000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.45,
+        "totalNominalPotongan": 9000,
+        "finalDibayarKombinasiSKP": 1991000
       }
     },
     {
@@ -4974,10 +4974,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 1.5,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 1.5,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -4999,18 +4999,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 1.5,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 1.5,
+        "total": 1.5,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 1.5,
         "skp_rate": null,
         "skp_status": null
       },
@@ -5020,10 +5020,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 9000,
+        "finalDibayar": 1991000
       },
       "final_skp": {
         "nip": "DUR011",
@@ -5031,13 +5031,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1991000
       },
       "final_combined": {
         "nip": "DUR011",
@@ -5045,17 +5045,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 1.5,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 9000,
+        "finalDibayar": 1991000,
+        "potonganAbsensiPct": 1.5,
+        "nominalPotonganAbsensi": 9000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.45,
+        "totalNominalPotongan": 9000,
+        "finalDibayarKombinasiSKP": 1991000
       }
     },
     {
@@ -5101,10 +5101,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 2,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 2,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -5126,18 +5126,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 2,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 2,
+        "total": 2,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 2,
         "skp_rate": null,
         "skp_status": null
       },
@@ -5147,10 +5147,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 12000,
+        "finalDibayar": 1988000
       },
       "final_skp": {
         "nip": "DUR012",
@@ -5158,13 +5158,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1988000
       },
       "final_combined": {
         "nip": "DUR012",
@@ -5172,17 +5172,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
+        "potonganAbsensiPct": 2,
+        "nominalPotonganAbsensi": 12000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.6,
+        "totalNominalPotongan": 12000,
+        "finalDibayarKombinasiSKP": 1988000
       }
     },
     {
@@ -5228,10 +5228,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 2,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 2,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -5253,18 +5253,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 2,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 2,
+        "total": 2,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 2,
         "skp_rate": null,
         "skp_status": null
       },
@@ -5274,10 +5274,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 12000,
+        "finalDibayar": 1988000
       },
       "final_skp": {
         "nip": "DUR013",
@@ -5285,13 +5285,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1988000
       },
       "final_combined": {
         "nip": "DUR013",
@@ -5299,17 +5299,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
+        "potonganAbsensiPct": 2,
+        "nominalPotonganAbsensi": 12000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.6,
+        "totalNominalPotongan": 12000,
+        "finalDibayarKombinasiSKP": 1988000
       }
     },
     {
@@ -5355,10 +5355,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 2,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 2,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -5380,18 +5380,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 2,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 2,
+        "total": 2,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 2,
         "skp_rate": null,
         "skp_status": null
       },
@@ -5401,10 +5401,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 12000,
+        "finalDibayar": 1988000
       },
       "final_skp": {
         "nip": "DUR014",
@@ -5412,13 +5412,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1988000
       },
       "final_combined": {
         "nip": "DUR014",
@@ -5426,17 +5426,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 2,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 12000,
+        "finalDibayar": 1988000,
+        "potonganAbsensiPct": 2,
+        "nominalPotonganAbsensi": 12000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.6,
+        "totalNominalPotongan": 12000,
+        "finalDibayarKombinasiSKP": 1988000
       }
     },
     {
@@ -5482,10 +5482,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 3,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 3,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -5507,18 +5507,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 3,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 3,
+        "total": 3,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 3,
         "skp_rate": null,
         "skp_status": null
       },
@@ -5528,10 +5528,10 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 18000,
+        "finalDibayar": 1982000
       },
       "final_skp": {
         "nip": "DUR015",
@@ -5539,13 +5539,13 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 18000,
+        "finalDibayar": 1982000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1982000
       },
       "final_combined": {
         "nip": "DUR015",
@@ -5553,17 +5553,17 @@
         "jabatan": "Wali Asuh",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 18000,
+        "finalDibayar": 1982000,
+        "potonganAbsensiPct": 3,
+        "nominalPotonganAbsensi": 18000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.9,
+        "totalNominalPotongan": 18000,
+        "finalDibayarKombinasiSKP": 1982000
       }
     },
     {
@@ -6240,10 +6240,10 @@
           "statusLengkap": "Lengkap",
           "potKeterlambatan": 0,
           "potPulangCepat": 0,
-          "potDurasi": 0,
+          "potDurasi": 3,
           "potHariKurang": 0,
           "potTidakLengkap": 0,
-          "totalHarian": 0,
+          "totalHarian": 3,
           "flags": [
             "SHIFT LINTAS HARI",
             "PULANG HARI BERIKUTNYA"
@@ -6265,18 +6265,18 @@
         "jumlahHariAbsen": 1,
         "potKeterlambatan": 0,
         "potPulangCepat": 0,
-        "potDurasi": 0,
+        "potDurasi": 3,
         "potHariKurang": 0,
         "potTidakLengkap": 0,
-        "totalRaw": 0,
-        "total": 0,
+        "totalRaw": 3,
+        "total": 3,
         "dupDates": 0,
-        "status": "Bersih"
+        "status": "Ada Potongan"
       },
       "rekap_error": null,
       "final_input": {
         "gross": 2000000,
-        "attendance_rate": 0,
+        "attendance_rate": 3,
         "skp_rate": null,
         "skp_status": null
       },
@@ -6286,10 +6286,10 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000
+        "nominal": 18000,
+        "finalDibayar": 1982000
       },
       "final_skp": {
         "nip": "SHIFT003",
@@ -6297,13 +6297,13 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
+        "nominal": 18000,
+        "finalDibayar": 1982000,
         "skpPct": 0,
         "nominalSKP": 0,
-        "finalDibayarSKP": 2000000
+        "finalDibayarSKP": 1982000
       },
       "final_combined": {
         "nip": "SHIFT003",
@@ -6311,17 +6311,17 @@
         "jabatan": "Wali Asrama",
         "bulan": "2026-09",
         "tukin": 2000000,
-        "potPct": 0,
+        "potPct": 3,
         "komponen": 600000,
-        "nominal": 0,
-        "finalDibayar": 2000000,
-        "potonganAbsensiPct": 0,
-        "nominalPotonganAbsensi": 0,
+        "nominal": 18000,
+        "finalDibayar": 1982000,
+        "potonganAbsensiPct": 3,
+        "nominalPotonganAbsensi": 18000,
         "potonganSKPPct": 0,
         "nominalPotonganSKP": 0,
-        "totalPotonganPct": 0,
-        "totalNominalPotongan": 0,
-        "finalDibayarKombinasiSKP": 2000000
+        "totalPotonganPct": 0.9,
+        "totalNominalPotongan": 18000,
+        "finalDibayarKombinasiSKP": 1982000
       }
     },
     {

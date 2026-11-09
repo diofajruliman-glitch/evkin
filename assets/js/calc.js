@@ -90,7 +90,7 @@
 
     const res = {
       _id: rec._id,
-      nip: rec.nip, nama: (ctx.pegByNip[String(rec.nip).trim()] || {}).nama || rec.nama, jabatan, metode,
+      nip: rec.nip, nama: rec.nama, jabatan, metode,
       tanggal: rec.tanggal.str, tanggalKey: rec.tanggal.key, monthKey: rec.tanggal.monthKey,
       hari: U.dayName(rec.tanggal),
       jamMasuk: U.fmtTime(t.masuk), jamPulang: U.fmtTime(t.pulang),
@@ -180,12 +180,13 @@
     res.statusLengkap = 'Lengkap';
     if (isWali) res.statusAbsensi = rec.crossDay ? 'LINTAS_HARI' : 'NORMAL';
 
-    // Complete next-day attendance is accepted without a daily deduction.
-    // Check completeness first: a next-day date alone cannot excuse a missing punch.
     if (rec.crossDay) {
       res.statusAbsensi = 'LINTAS_HARI';
-      if (metode === 'reguler') { res._lateMin = 0; res._earlyMin = 0; }
-      return res;
+      if (metode === 'reguler') {
+        res._lateMin = 0;
+        res._earlyMin = 0;
+        return res;
+      }
     }
 
     if (metode === 'durasi') {

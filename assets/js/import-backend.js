@@ -264,8 +264,9 @@
     const rows = await EVKIN.loadCalculationInput({silent:true});
     const expected = Number(state.workflowMeta.total_row_counts &&
       state.workflowMeta.total_row_counts.raw_import || 0);
-    if (!expected || rows.length !== expected || state.raw.length !== expected || state.data.length !== expected) {
-      throw new Error(`Hydration canonical tidak lengkap: ${state.data.length}/${expected} baris.`);
+    const expectedCalculation = Number(state.importStats?.totalRecord ?? expected);
+    if (!expected || state.raw.length !== expected || rows.length !== expectedCalculation || state.data.length !== expectedCalculation) {
+      throw new Error(`Hydration canonical tidak lengkap: ${state.data.length}/${expectedCalculation} record, ${state.raw.length}/${expected} baris sumber.`);
     }
     return true;
   }
@@ -618,18 +619,30 @@
     const periods = (batch.periods || []).map(value => `<option value="${EVKIN.util.esc(value)}" ${value === batch.period ? 'selected' : ''}>${EVKIN.util.esc(value)}</option>`).join('');
     const periodPlaceholder = batch.period ? '' : '<option value="" selected disabled>Pilih periode...</option>';
     const isEabsensi = batch.source_format === 'csv_eabsensi';
-    const previewRows = (preview.rows || []).map(row => `<tr><td>${row.source_row}</td><td>${EVKIN.util.esc(row.nip || '')}</td><td>${EVKIN.util.esc(row.tanggal || '')}</td><td>${EVKIN.util.esc(row.jam_masuk || '')}</td><td>${EVKIN.util.esc(row.jam_pulang || '')}</td><td>${EVKIN.util.esc(row.zona || '')}</td><td>${EVKIN.util.esc((row.error_codes || []).join(', '))}</td></tr>`).join('');
-    const errorRows = (errors.rows || []).map(row => `<tr><td>${row.source_row}</td><td>${EVKIN.util.esc(row.nip || '')}</td><td>${EVKIN.util.esc(row.tanggal || '')}</td><td>${EVKIN.util.esc(row.severity || '')}</td><td>${EVKIN.util.esc((row.error_codes || []).join(', '))}</td></tr>`).join('');
+    const blockerCount = Number(batch.invalid_rows || 0);
+    const nonAttendanceCount = Number(batch.non_attendance_rows ?? batch.timings?.non_attendance_rows ?? 0);
+    const warningCount = Math.max(0, Number(errors.total || 0) - blockerCount);
+    const issueLabels = {
+      MISSING_NIP:'NIP kosong', INVALID_NIP:'Format NIP perlu ditinjau',
+      INVALID_DATE:'Tanggal absensi kosong atau tidak valid',
+      INVALID_CHECK_IN:'Format jam masuk tidak valid', INVALID_CHECK_OUT:'Format jam pulang tidak valid',
+      MISSING_CHECK_IN:'Jam masuk kosong (peringatan)', MISSING_CHECK_OUT:'Jam pulang kosong (peringatan)',
+      NO_ATTENDANCE_DATE:'Tanpa rekaman absensi; disimpan sebagai data sumber'
+    };
+    const issueText = row => (row.error_codes || []).map(code => issueLabels[code] ? `${issueLabels[code]} (${code})` : code).join('; ');
+    const previewRows = (preview.rows || []).map(row => `<tr><td>${row.source_row}</td><td>${EVKIN.util.esc(row.nip || '')}</td><td>${EVKIN.util.esc(row.tanggal || '')}</td><td>${EVKIN.util.esc(row.jam_masuk || '')}</td><td>${EVKIN.util.esc(row.jam_pulang || '')}</td><td>${EVKIN.util.esc(row.zona || '')}</td><td>${EVKIN.util.esc(issueText(row))}</td></tr>`).join('');
+    const errorRows = (errors.rows || []).map(row => `<tr><td>${row.source_row}</td><td>${EVKIN.util.esc(row.nip || '')}</td><td>${EVKIN.util.esc(row.tanggal || '')}</td><td>${EVKIN.util.esc(row.severity || '')}</td><td>${EVKIN.util.esc(issueText(row))}</td></tr>`).join('');
     el.querySelector('#backendImportResult').innerHTML = `
       ${notice ? `<div class="alert ${batch.status === 'READY' ? 'info' : 'error'}">${EVKIN.util.esc(notice)}</div>` : ''}
       <div class="alert ${batch.status === 'READY' ? 'success' : batch.status === 'COMMITTED' ? 'success' : 'error'}">Status: <strong>${EVKIN.util.esc(batch.status)}</strong>${batch.error_message ? ' — ' + EVKIN.util.esc(batch.error_message) : ''}</div>
       ${summaryCards(batch)}
+      ${nonAttendanceCount ? `<div class="alert info">${nonAttendanceCount.toLocaleString('id-ID')} baris tanpa tanggal dan jam tetap disimpan sebagai data sumber, tidak dihitung sebagai hadir. Potongan mengikuti jumlah hari kerja dan aturan jabatan.</div>` : ''}
       ${previewError ? `<div class="alert error">Preview gagal dimuat: ${EVKIN.util.esc(previewError)}</div>` : ''}
       <div class="card"><h3>Preview backend (maks. 50 baris)</h3><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Masuk</th><th>Pulang</th><th>Zona</th><th>Issue</th></tr></thead><tbody>${previewRows}</tbody></table></div></div>
       ${errorsError ? `<div class="alert error">Contoh error gagal dimuat: ${EVKIN.util.esc(errorsError)}</div>` : ''}
-      ${errors.rows && errors.rows.length ? `<div class="card"><h3>Contoh warning/blocker (maks. 50 baris)</h3><p class="alert warn">${errors.total.toLocaleString('id-ID')} baris perlu ditinjau. ${Number(batch.invalid_rows || 0) > 0
-        ? 'Konfirmasi hanya diperlukan untuk melanjutkan tanpa baris invalid.'
-        : 'Semua baris dapat diproses tanpa konfirmasi invalid. Jam masuk/pulang kosong saja bukan blocker.'}</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Severity</th><th>Alasan</th></tr></thead><tbody>${errorRows}</tbody></table></div></div>` : ''}
+      ${errors.rows && errors.rows.length ? `<div class="card"><h3>Contoh warning/blocker (maks. 50 baris)</h3><p class="alert ${blockerCount ? 'error' : 'warn'}">${blockerCount.toLocaleString('id-ID')} baris blocker tidak dapat disimpan sebelum diperbaiki. ${warningCount.toLocaleString('id-ID')} baris peringatan tetap dapat disimpan. ${blockerCount
+        ? 'Jika memilih melanjutkan tanpa baris invalid, baris blocker tidak ikut disimpan.'
+        : 'Semua baris dapat diproses tanpa konfirmasi invalid. Jam masuk/pulang kosong saja bukan blocker.'}</p>${Number(batch.invalid_date_rows || 0) > 0 ? '<p>Lengkapi tanggal absensi pada sumber data lalu impor ulang. Diperlukan hari/tanggal lengkap; kolom Bulan dan Tahun saja belum cukup.</p>' : ''}<p class="muted">Batas 50 baris hanya untuk tampilan contoh; seluruh baris tetap diperiksa. Blocker ditampilkan lebih dahulu.</p><div class="table-wrap"><table class="data-table"><thead><tr><th>Row</th><th>NIP</th><th>Tanggal</th><th>Severity</th><th>Alasan</th></tr></thead><tbody>${errorRows}</tbody></table></div></div>` : ''}
       ${batch.status === 'READY' ? `<div class="actions-row"><label>Periode <select id="backendImportPeriod">${periodPlaceholder}${periods}</select></label>${Number(batch.invalid_rows || 0) > 0 ? '<label><input type="checkbox" id="backendImportAcceptInvalid"> Saya memahami baris invalid tidak ikut disimpan</label>' : ''}<button class="btn btn-primary" id="backendImportCommit">Simpan Impor</button></div>` : ''}
       ${batch.status === 'COMMITTED' ? (batch._workflowLoaded
         ? `<div class="alert success">Import ${isEabsensi ? 'CSV eAbsensi' : 'Excel/Standard'} tersimpan dan workflow berhasil dimuat.</div><div class="actions-row"><button class="btn btn-primary" id="backendImportContinue">Lanjut ke Konfigurasi</button></div>`

@@ -15,6 +15,7 @@ async function main() {
   raw[1].tanggal='2026-08-10'; raw[1].tanggal_pulang='2026-08-11';
   raw[1].jam_masuk='21:30:00'; raw[1].jam_pulang='06:45:00';
   let calls = 0;
+  let expectedCalculationRows = raw.length;
   const workflowConfig={saved:true,_workflow:{workflow_id:'WORKFLOW-A',month:'2026-08',
     importMode:'csv_eabsensi',importStatus:'COMPLETE',
     importStats:{totalRaw:1201,totalRecord:1201,months:['2026-08']}}};
@@ -24,7 +25,7 @@ async function main() {
       if(parsed.pathname==='/api/workflow/state') {
         return {ok:true,json:async()=>({data:{config:workflowConfig},meta:{
           workflow_id:'WORKFLOW-A',periode:'2026-08',status:'ACTIVE',
-          row_counts:{raw_import:1201},total_row_counts:{raw_import:1201,processed_data:0}
+          row_counts:{raw_import:raw.length},total_row_counts:{raw_import:raw.length,processed_data:0}
         }})};
       }
       if(parsed.pathname==='/api/workflow/data/raw_import') {
@@ -38,8 +39,8 @@ async function main() {
       const start = (page - 1) * 500;
       calls++;
       return {ok:true,json:async()=>({status:'ok',workflow_id:'WORKFLOW-A',
-        import_status:'COMPLETE',expected_source_rows:1201,persisted_source_rows:1201,
-        expected_calculation_rows:1201,page,page_size:500,total:1201,total_pages:3,
+        import_status:'COMPLETE',expected_source_rows:raw.length,persisted_source_rows:raw.length,
+        expected_calculation_rows:expectedCalculationRows,page,page_size:500,total:raw.length,total_pages:Math.ceil(raw.length/500),
         rows:raw.slice(start,start + 500)})};
     }};
   for (const name of ['utils','data','state','import','calc','harian']) {
@@ -78,6 +79,25 @@ async function main() {
   E.state.workflowMeta={row_counts:{raw_import:0},total_row_counts:{raw_import:1201}};
   assert.equal(E.stepUnlocked('config'),false,
     'Historical rows from another workflow must not unlock Config after active reset');
+
+  raw.push({...raw[0],nip:'SOURCE-ONLY',tanggal:null,tanggal_pulang:'',jam_masuk:'',jam_pulang:''});
+  workflowConfig._workflow.importStats.totalRaw = raw.length;
+  assert.equal(await E.load(), true);
+  await E.loadCalculationInput();
+  assert.equal(E.state.raw.length, 1202);
+  assert.equal(E.state.data.length, 1201, 'Source-only rows must not fail normalized-row completeness');
+  raw.splice(0, raw.length - 1);
+  workflowConfig._workflow.importStats.totalRaw = 1;
+  workflowConfig._workflow.importStats.totalRecord = expectedCalculationRows = 0;
+  assert.equal(await E.load(), true);
+  await E.loadCalculationInput();
+  assert.equal(E.state.raw.length, 1);
+  assert.equal(E.state.data.length, 0);
+  assert.equal(E.state.importStats.totalRecord, 0, 'Explicit zero dated records must not fall back to raw row count');
+  assert.equal(E.state.month, '2026-08', 'The reporting month remains available without a dated attendance');
+  raw[0] = {...raw[0],tanggal:'2026-08-03',jam_masuk:'07:30',jam_pulang:'16:00'};
+  await assert.rejects(E.loadCalculationInput({silent:true}), /1\/0 record/,
+    'A declared zero calculation count must still reject an unexpected dated row');
   console.log('CSV workflow refresh -> Config hydration -> 1,201-row Harian calculation PASS');
 }
 

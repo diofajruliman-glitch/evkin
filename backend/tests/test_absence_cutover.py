@@ -155,6 +155,47 @@ def test_python_canonical_batch_persists_all_stages_atomically(tmp_path):
         )
 
 
+def test_all_undated_source_rows_publish_monthly_results_without_daily_rows(tmp_path):
+    path = fixture_database(tmp_path)
+    with duckdb.connect(str(path)) as conn:
+        conn.execute("DROP TABLE raw_import")
+        conn.execute('''CREATE TABLE raw_import (
+            workflow_id VARCHAR,import_id VARCHAR,nip VARCHAR,nama VARCHAR,jabatan VARCHAR,bulan VARCHAR,
+            tanggal VARCHAR,tanggal_pulang VARCHAR,jam_masuk VARCHAR,jam_pulang VARCHAR
+        )''')
+        conn.execute("INSERT INTO raw_import VALUES ('default','undated','A-1','Source Name','Wali Asuh','2026-10',NULL,'','','')")
+        conn.execute("UPDATE workflow_config SET _workflow=?", [json.dumps({
+            "month": "2026-10", "workflow_id": "default", "importMode": "standard", "timeMode": "original",
+        })])
+    svc, _ = service(path)
+    batch = svc.calculate_sync("2026-10", "tester")
+    assert batch["status"] == "COMPLETED", batch.get("error_message")
+    assert batch["daily_count"] == 0 and batch["rekap_count"] == batch["final_count"] == 1
+    with duckdb.connect(str(path)) as conn:
+        assert conn.execute("SELECT count(*) FROM hitung_harian").fetchone()[0] == 0
+        assert conn.execute("SELECT nip,jabatan,hariAdaAbsensi,hariKurang,total FROM rekap_sdm").fetchone() == (
+            "A-1", "Wali Asuh", 0, 1, 3,
+        )
+        assert conn.execute("SELECT nip,tukin,nominal FROM final_absensi").fetchone() == ("A-1", 5_000_001, 45_000)
+        assert conn.execute("SELECT count(*) FROM raw_import WHERE tanggal IS NULL").fetchone()[0] == 1
+        assert_canonical_absence_ready(conn, "2026-10", AuthorityConfig(CalculationAuthority.PYTHON_CANONICAL, True))
+    reused = svc.calculate_sync("2026-10", "tester", reuse=True)
+    assert reused["status"] == "COMPLETED" and reused["published_calculation_id"] == batch["calculation_id"]
+
+
+@pytest.mark.parametrize("existing_period", ["monthKey", "bulan", "tanggalKey"])
+def test_empty_daily_replacement_deletes_only_the_selected_period(existing_period):
+    with duckdb.connect() as conn:
+        conn.execute(f'CREATE TABLE hitung_harian (nip VARCHAR,"{existing_period}" VARCHAR,calculation_id VARCHAR)')
+        october = "2026-10-01" if existing_period == "tanggalKey" else "2026-10"
+        november = "2026-11-01" if existing_period == "tanggalKey" else "2026-11"
+        conn.executemany("INSERT INTO hitung_harian VALUES (?,?,?)", [
+            ("REMOVE", october, "old-october"), ("KEEP", november, "keep-november"),
+        ])
+        cutover._replace_period(conn, "hitung_harian", [], "2026-10", "monthKey", "new-october")
+        assert conn.execute("SELECT nip,calculation_id FROM hitung_harian").fetchall() == [("KEEP", "keep-november")]
+
+
 def test_mid_persistence_failure_rolls_back_all_three_stages(tmp_path, monkeypatch):
     path = fixture_database(tmp_path)
     svc, _ = service(path)

@@ -28,13 +28,18 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.absence_shadow_engine import (
     BASELINE_ID,
     BASELINE_SOURCE_SHA256,
+    IMPORT_SOURCE_SHA256_20261105,
+    ZONE_OFFSET,
+    ZONE_OFFSET_ADD,
     _flatten,
+    add_days,
     build_context,
     compute_final_absensi,
     compute_record,
     compute_rekap,
     detect_import_columns,
     normalize_raw_rows,
+    parse_date,
     validate_source_fingerprint,
 )
 from backend.runtime_guard import DATABASE_GATE, assert_current_generation, current_reset_generation
@@ -42,8 +47,8 @@ from backend.runtime_guard import DATABASE_GATE, assert_current_generation, curr
 
 ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH = ROOT / "backend/tests/fixtures/absence_cross_day_complete_output_2026_10.json"
-WORKBOOK_RULES_GOLDEN_SHA256 = "1aea4080d79e4e0767765a2cf5516858a6c704a4166d427979b29bc1832781be"
-PYTHON_CALCULATION_VERSION = "ABSENCE_PY_2026_11_V3"
+WORKBOOK_RULES_GOLDEN_SHA256 = "c480f29f730526206abaa22d3d19664f4e071a58b0c102ef8d39f7b908c2350e"
+PYTHON_CALCULATION_VERSION = "ABSENCE_PY_2026_11_V4"
 PERIOD_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ACTIVE_STATUSES = ("PENDING", "RUNNING")
 FINAL_STATUSES = (
@@ -91,9 +96,10 @@ def formula_source_fingerprint() -> str:
     material = {
         "baseline": BASELINE_ID,
         "golden": WORKBOOK_RULES_GOLDEN_SHA256,
-        "sources": BASELINE_SOURCE_SHA256,
+        "sources": {**BASELINE_SOURCE_SHA256, **IMPORT_SOURCE_SHA256_20261105},
         "python_version": PYTHON_CALCULATION_VERSION,
         "python_engine_sha256": hashlib.sha256(python_engine.read_bytes()).hexdigest(),
+        "python_cutover_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -270,6 +276,95 @@ def _load_master(
     return result
 
 
+def merge_import_attendance_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Combine calculation punches while retaining the first source row's metadata."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    output: list[dict[str, Any]] = []
+    for record in records:
+        work_date = record.get("tanggal") or {}
+        if not record.get("nip") or not work_date.get("key"):
+            output.append(dict(record))
+            continue
+        key = (str(record["nip"]), work_date["key"])
+        if key not in groups:
+            groups[key] = []
+            output.append(dict(record))
+        groups[key].append(record)
+
+    # Equal morning punches can be two copies of a single checkout.
+    corrected = set()
+    for key in sorted(groups):
+        group = groups[key]
+        minute = group[0].get("pulangMin")
+        if minute is None or not 360 <= minute < 540 or not all(
+            row.get("masukMin") == row.get("pulangMin") == minute
+            and row.get("masukRaw") == row.get("pulangRaw")
+            and not row.get("crossDay") for row in group
+        ):
+            continue
+        previous_date = add_days(group[0]["tanggal"], -1)
+        previous_key = (key[0], previous_date["key"])
+        previous = groups.get(previous_key, [])
+        arrivals = [row["masukMin"] for row in previous if row.get("masukMin") is not None]
+        checkout = [{**row, "masukMin": None, "masukRaw": "", "masukAt": "",
+                     "tanggalPulangObj": row["tanggal"]} for row in group]
+        if arrivals and all(row.get("pulangMin") is None for row in previous) and 1440 + minute - min(arrivals) <= 1080:
+            previous.extend(checkout)
+            del groups[key]
+        else:
+            groups[key] = checkout
+            corrected.add(key)
+
+    output = [target for target in output if not target.get("tanggal") or not target.get("nip")
+              or (str(target["nip"]), target["tanggal"]["key"]) in groups]
+    for target in output:
+        work_date = target.get("tanggal") or {}
+        group = groups.get((str(target.get("nip")), work_date.get("key")))
+        if not group:
+            continue
+        target["sourceRecordIds"] = [
+            source_id for record in group
+            for source_id in (record.get("sourceRecordIds") or [record.get("_id")])
+            if source_id is not None
+        ]
+        if len(group) == 1 and (str(target["nip"]), work_date["key"]) not in corrected:
+            continue
+        arrivals = [record for record in group if record.get("masukMin") is not None]
+        arrival = min(arrivals, key=lambda record: record["masukMin"]) if arrivals else None
+        departures = []
+        for record in group:
+            if record.get("pulangMin") is None:
+                continue
+            out_date = record.get("tanggalPulangObj") or parse_date(record.get("tanggalPulang"))
+            out_date = out_date or (add_days(work_date, 1) if record.get("crossDay") else work_date)
+            departures.append((out_date["key"], record["pulangMin"], record, out_date))
+        departure = max(departures, key=lambda item: item[:2]) if departures else None
+        target["masukMin"] = arrival["masukMin"] if arrival else None
+        target["pulangMin"] = departure[1] if departure else None
+        target["masukRaw"] = arrival.get("masukRaw", "") if arrival else ""
+        target["pulangRaw"] = departure[2].get("pulangRaw", "") if departure else ""
+        target["masukAt"] = arrival.get("masukAt", "") if arrival else ""
+        target["pulangAt"] = departure[2].get("pulangAt", "") if departure else ""
+        target["tanggalMasukObj"] = (arrival.get("tanggalMasukObj") or work_date) if arrival else None
+        target["tanggalPulangObj"] = departure[3] if departure else None
+        target["tanggalPulang"] = departure[3]["str"] if departure else ""
+        target["crossDay"] = bool(departure and departure[0] != work_date["key"])
+        zone = target.get("zona") or "WIB"
+        for clock, raw_value in (("masuk", target["masukMin"]), ("pulang", target["pulangMin"])):
+            target[f"{clock}NormMin"] = None if raw_value is None else (raw_value + ZONE_OFFSET.get(zone, 0)) % 1440
+            target[f"{clock}NormMinAdd"] = None if raw_value is None else (raw_value + ZONE_OFFSET_ADD.get(zone, 0)) % 1440
+        target["issues"] = list(dict.fromkeys(
+            issue for record in group for issue in (record.get("issues") or [])
+            if issue not in ("Jam masuk kosong", "Jam pulang kosong")
+        ))
+        if arrival is None:
+            target["issues"].append("Jam masuk kosong")
+        if departure is None:
+            target["issues"].append("Jam pulang kosong")
+        target["dupFlag"] = False
+    return output
+
+
 def load_canonical_source(
     conn: duckdb.DuckDBPyConnection, period: str
 ) -> dict[str, Any]:
@@ -280,8 +375,9 @@ def load_canonical_source(
     config, workflow = _load_config(conn)
     columns = _table_columns(conn, "raw_import")
     if {"workflow_id", "tanggal"} <= set(columns):
-        cursor = conn.execute("""SELECT * FROM raw_import
-            WHERE workflow_id = ? AND substr(CAST(tanggal AS VARCHAR), 1, 7) = ?
+        period_expression = 'coalesce(bulan,substr(CAST(tanggal AS VARCHAR),1,7))' if "bulan" in columns else 'substr(CAST(tanggal AS VARCHAR),1,7)'
+        cursor = conn.execute(f"""SELECT * FROM raw_import
+            WHERE workflow_id = ? AND {period_expression} = ?
             ORDER BY rowid""", [workflow.get("workflow_id") or workflow.get("workflowId") or "default", period])
     else:
         cursor = conn.execute('SELECT * FROM "raw_import" ORDER BY rowid')
@@ -298,21 +394,34 @@ def load_canonical_source(
         for record in records:
             record["sourceFormat"] = "wali"
     selected = [record for record in records if record["tanggal"]["monthKey"] == period]
-    if not selected:
+    nonattendance = []
+    if "bulan" in columns and "import_id" in columns:
+        for row in rows:
+            if str(row.get("bulan") or "") == period and str(row.get("nip") or "").strip() and not any(
+                row.get(key) is not None and str(row[key]).strip()
+                for key in ("tanggal", "tanggal_pulang", "jam_masuk", "jam_pulang")
+            ):
+                nonattendance.append({"nip": row["nip"], "nama": row.get("nama"),
+                                      "jabatan": row.get("jabatan"), "period": period})
+    if not selected and not nonattendance:
         raise AbsenceCalculationError("NO_SOURCE_FOR_PERIOD", f"Tidak ada raw_import untuk periode {period}")
     selected_indices = {int(str(record["_id"]).rsplit("-", 1)[-1]) for record in selected}
-    selected_raw = [row for index, row in enumerate(rows) if index in selected_indices]
+    selected_raw = rows if "bulan" in columns and "import_id" in columns else [row for index, row in enumerate(rows) if index in selected_indices]
+    if "import_id" in columns and str(workflow.get("importMode") or "").lower() == "standard":
+        selected = merge_import_attendance_records(selected)
     active_period = str(workflow.get("month") or "").strip()
     if "workflow_id" not in columns and active_period and active_period != period:
         raise AbsenceCalculationError(
             "WORKFLOW_PERIOD_MISMATCH",
             f"Workflow aktif {active_period}, bukan periode yang diminta {period}",
         )
-    master = _load_master(conn, {record["nip"] for record in selected})
+    master = _load_master(conn, {record["nip"] for record in selected + nonattendance})
     source = {
         "period": period,
         "headers": headers,
         "records": selected,
+        "nonattendance_records": nonattendance,
+        "raw_source_count": len(selected_raw),
         "config": config,
         "workflow": workflow,
         "master": master,
@@ -348,6 +457,14 @@ def calculate_source(source: dict[str, Any]) -> dict[str, Any]:
         groups.setdefault(f"{row.get('monthKey')}|{row.get('nip')}", []).append(row)
     started = time.perf_counter()
     rekap = [compute_rekap(group, context) for group in groups.values()]
+    nonattendance = {}
+    for row in source.get("nonattendance_records", []):
+        nonattendance.setdefault(f"{row.get('period') or source['period']}|{row.get('nip')}", row)
+    for key, row in nonattendance.items():
+        if key not in groups:
+            rekap.append(compute_rekap([], context, roster={
+                **row, "bulan": row.get("period") or source["period"],
+            }))
     rekap.sort(key=lambda row: (str(row.get("bulan")), str(row.get("nip"))))
     timings["rekap_ms"] = (time.perf_counter() - started) * 1000
 
@@ -501,6 +618,27 @@ def _replace_period(
     period_column: str, calculation_id: str,
 ) -> None:
     import pandas as pd
+
+    if not rows:
+        columns = _table_columns(conn, table)
+        if columns and columns != ["_empty"]:
+            lower = {name.lower(): name for name in columns}
+            existing_period = lower.get(period_column.lower())
+            if not existing_period and period_column == "monthKey":
+                existing_period = lower.get("bulan") or lower.get("tanggalkey")
+            if existing_period:
+                expression = f'CAST("{existing_period}" AS VARCHAR)'
+                if existing_period.lower() == "tanggalkey":
+                    expression = f'substr({expression},1,7)'
+                conn.execute(f'DELETE FROM "{table}" WHERE {expression}=?', [period])
+            elif conn.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]:
+                raise AbsenceCalculationError("RESULT_PERIOD_COLUMN_MISSING", f"Periode tabel {table} tidak dapat diverifikasi")
+        else:
+            conn.execute(f'''CREATE OR REPLACE TABLE "{table}" (
+                nip VARCHAR,nama VARCHAR,jabatan VARCHAR,"{period_column}" VARCHAR,
+                calculation_id VARCHAR,calculation_version VARCHAR,calculation_engine VARCHAR
+            )''')
+        return
 
     frame = pd.DataFrame(_rows_for_storage(rows, calculation_id))
     relation = f"tmp_{table}_{uuid.uuid4().hex[:10]}"

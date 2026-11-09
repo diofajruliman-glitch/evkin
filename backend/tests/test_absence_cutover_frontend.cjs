@@ -79,8 +79,43 @@ async function main() {
   assert.deepEqual(pages, [1, 2]);
 
   const exportSource = fs.readFileSync('assets/js/export.js','utf8');
-  assert.match(exportSource, /if \(!pythonCanonical && chosen\.some/);
-  assert.match(exportSource, /fallback browser\/IndexedDB dinonaktifkan/);
+  const exportCalls = [], notices = [];
+  let failExport = false, browserFallbackCalls = 0;
+  EVKIN.util = {esc:String, monthLabel:String};
+  EVKIN.stepUnlocked = () => true;
+  EVKIN.toast = (message, kind) => notices.push({message, kind});
+  EVKIN.auditMod = {logDataExport(){}};
+  sandbox.document.getElementById = () => null;
+  EVKIN.exportBackend.startExportJob = async options => {
+    exportCalls.push(options);
+    if (failExport) throw new Error('Backend export unavailable');
+  };
+  vm.runInNewContext(exportSource, sandbox);
+  EVKIN.exportMod.downloadSelected = () => { browserFallbackCalls += 1; };
+  const exportButton = {disabled:false};
+  EVKIN.exportMod.render({
+    innerHTML:'', querySelector:() => exportButton,
+    querySelectorAll:() => [{value:'FINAL ABSENSI'}]
+  });
+  async function clickExport() {
+    exportButton.onclick();
+    for (let attempt = 0; exportButton.disabled && attempt < 20; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(exportButton.disabled, false, 'Export must finish and restore the button');
+  }
+  await clickExport();
+  assert.equal(exportCalls.length, 1);
+  assert.equal(exportCalls[0].bulan, '2026-08');
+  assert.equal(exportCalls[0].calculationId, 'batch-uat',
+    'Backend export must identify the completed canonical calculation');
+  assert.deepEqual(Array.from(exportCalls[0].sheetNames), ['FINAL ABSENSI']);
+  assert.equal(browserFallbackCalls, 0);
+  failExport = true;
+  await clickExport();
+  assert.equal(exportCalls.length, 2);
+  assert.equal(browserFallbackCalls, 0, 'An active backend failure must never export browser cache');
+  assert.ok(notices.some(item => item.kind === 'error' && item.message.includes('Backend export unavailable')));
   console.log('Frontend canonical poll/hydrate and export authority guard: PASS');
 }
 

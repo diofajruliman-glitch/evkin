@@ -1177,7 +1177,7 @@ def get_workflow_calculation_input(
         ).fetchone()[0])
         stats = workflow.get('importStats') if isinstance(workflow.get('importStats'), dict) else {}
         expected_source_rows = int(stats.get('totalRaw') or persisted_rows or 0)
-        expected_calculation_rows = int(stats.get('totalRecord') or expected_source_rows or 0)
+        expected_calculation_rows = int(stats['totalRecord'] if stats.get('totalRecord') is not None else expected_source_rows)
         declared_status = str(workflow.get('importStatus') or '').upper()
         complete = persisted_rows > 0 and persisted_rows == expected_source_rows
         if declared_status and declared_status != 'COMPLETE':

@@ -645,6 +645,127 @@ def test_malformed_time_blocks_but_legacy_missing_punch_remains_warning(service)
     assert "MISSING_CHECK_IN" in by_nip["MISSING"]["error_codes"]
 
 
+def test_error_preview_prioritizes_blockers_after_more_than_fifty_warnings(service):
+    batch = upload(service, csv_bytes([
+        *[row(f"WARN-{index}", masuk="", pulang="") for index in range(60)],
+        row("NEEDS-DATE", date="", masuk="", pulang=""),
+    ]))
+    assert batch["invalid_rows"] == 1
+    first = service.preview(batch["import_id"], errors_only=True)
+    assert first["total"] == 61 and len(first["rows"]) == 50
+    assert first["rows"][0]["nip"] == "NEEDS-DATE"
+    assert first["rows"][0]["severity"] == "BLOCKER"
+    assert first["rows"][1]["nip"] == "WARN-0"
+    second = service.preview(batch["import_id"], page=2, errors_only=True)
+    assert len(second["rows"]) == 11
+    assert len({r["source_row"] for r in first["rows"] + second["rows"]}) == 61
+    assert service.preview(batch["import_id"])["rows"][0]["nip"] == "WARN-0"
+
+
+def test_undated_monthly_rows_are_retained_without_creating_attendance(service):
+    headers = HEADERS + ["Bulan", "Tahun"]
+    content = csv_bytes([row("OFF", date="", masuk="", pulang="", Bulan="10", Tahun="2026")], headers)
+    batch = upload(service, content)
+    assert (batch["valid_rows"], batch["invalid_rows"], batch["non_attendance_rows"]) == (1, 0, 1)
+    assert batch["period"] == "2026-10"
+    assert service.preview(batch["import_id"], errors_only=True)["total"] == 0
+    preview = service.preview(batch["import_id"])["rows"][0]
+    assert preview["tanggal"] is None and preview["jam_masuk"] == preview["jam_pulang"] == ""
+    assert preview["error_codes"] == ["NO_ATTENDANCE_DATE"]
+    assert service.commit(batch["import_id"])["status"] == "COMMITTED"
+    with service._connect() as conn:
+        assert conn.execute('SELECT nip,tanggal,bulan FROM raw_import').fetchall() == [("OFF", None, "2026-10")]
+        config = json.loads(conn.execute('SELECT _workflow FROM workflow_config').fetchone()[0])
+        assert config["importStats"]["totalRaw"] == 1
+        assert config["importStats"]["totalRecord"] == 0
+        assert config["importStats"]["nonAttendanceRows"] == 1
+
+
+@pytest.mark.parametrize("day,punch", [("bad-date", ""), ("", "07:00")])
+def test_month_scope_does_not_hide_malformed_dates_or_orphan_punches(service, day, punch):
+    batch = upload(service, csv_bytes([row("BAD", date=day, masuk=punch, pulang="", Bulan="10", Tahun="2026")], HEADERS + ["Bulan", "Tahun"]))
+    assert batch["invalid_rows"] == 1 and batch["non_attendance_rows"] == 0
+    assert "INVALID_DATE" in service.preview(batch["import_id"])["rows"][0]["error_codes"]
+
+
+def test_checkout_only_is_anchored_to_previous_day_and_retained_in_reporting_month(service):
+    headers = HEADERS + ["Tanggal Pulang", "Bulan", "Tahun"]
+    batch = upload(service, csv_bytes([row("OUT", date="", masuk="", pulang="06:00", **{
+        "Tanggal Pulang": "2026-10-01", "Bulan": "10", "Tahun": "2026",
+    })], headers))
+    preview = service.preview(batch["import_id"])["rows"][0]
+    assert preview["tanggal"] == "2026-09-30" and preview["tanggal_pulang"] == "01/10/2026"
+    assert preview["jam_masuk"] == "" and preview["jam_pulang"] == "06:00:00"
+    assert preview["cross_day"] and batch["period"] == "2026-10"
+    service.commit(batch["import_id"])
+    with service._connect() as conn:
+        assert conn.execute('SELECT tanggal,bulan FROM raw_import').fetchone() == ("2026-09-30", "2026-10")
+
+
+def test_replacing_reporting_month_removes_old_undated_rows_and_preserves_other_month(service):
+    headers = HEADERS + ["Bulan", "Tahun"]
+    def month_row(nip, month):
+        return row(nip, date="", masuk="", pulang="", Bulan=month, Tahun="2026")
+    first = upload(service, csv_bytes([month_row("OLD-OCT", "10")], headers))
+    service.commit(first["import_id"])
+    other = upload(service, csv_bytes([month_row("KEEP-NOV", "11")], headers))
+    service.commit(other["import_id"])
+    replacement = upload(service, csv_bytes([month_row("NEW-OCT", "10")], headers))
+    service.commit(replacement["import_id"])
+    with service._connect() as conn:
+        assert conn.execute('SELECT nip FROM raw_import ORDER BY nip').fetchall() == [("KEEP-NOV",), ("NEW-OCT",)]
+
+
+def test_existing_backend_raw_schema_is_upgraded_without_losing_other_period(service):
+    august = upload(service, csv_bytes([row("KEEP-AUG", "2026-08-03")]))
+    service.commit(august["import_id"])
+    with service._connect() as conn:
+        conn.execute('ALTER TABLE raw_import DROP COLUMN bulan')
+    september = upload(service, csv_bytes([row("NEW-SEP", "2026-09-01")]))
+    service.commit(september["import_id"])
+    with service._connect() as conn:
+        assert conn.execute('SELECT nip,bulan FROM raw_import ORDER BY nip').fetchall() == [
+            ("KEEP-AUG", "2026-08"), ("NEW-SEP", "2026-09"),
+        ]
+
+
+def test_undated_roster_reaches_monthly_calculation_and_fingerprint_uses_all_raw_rows(service):
+    from backend.absence_cutover import calculate_source
+    headers = HEADERS + ["Bulan", "Tahun"]
+    rows = [row("OFF", date="", masuk="", pulang="", Jabatan=job, Bulan="10", Tahun="2026")
+            for job in ["Wali Asuh", "Guru"]]
+    config = {**CONFIG, "jabatanMaster": [{"nama": "Wali Asuh", "metode": "durasi"}],
+              "potonganHariKurangPerHari": 3, "effectiveDaysMode": "manual", "effectiveDaysManual": 22}
+    item = service.save_upload(UploadFile(io.BytesIO(csv_bytes(rows, headers)), filename="off.csv"),
+                               operator="uat", source_format="standard", workflow_config_json=json.dumps(config))
+    batch = service.stage(item["import_id"])
+    service.commit(batch["import_id"])
+    with service._connect() as conn:
+        conn.execute('CREATE TABLE master_data(nip VARCHAR,nama VARCHAR,jabatan VARCHAR,tukin DOUBLE)')
+        conn.execute("INSERT INTO master_data VALUES ('OFF','Master','Guru',1000)")
+        source = load_canonical_source(conn, "2026-10")
+        assert source["records"] == [] and source["raw_source_count"] == 2
+        results = calculate_source(source)
+        assert results["daily"] == [] and len(results["rekap"]) == 1
+        assert results["rekap"][0]["jabatan"] == "Wali Asuh"
+        assert results["rekap"][0]["total"] == 66
+        assert results["final_absensi"][0]["tukin"] == 1000
+        fingerprint = source["input_fingerprint"]
+        conn.execute("UPDATE raw_import SET jenis='Revised source note' WHERE source_row=2")
+        assert load_canonical_source(conn, "2026-10")["input_fingerprint"] != fingerprint
+
+
+def test_same_file_from_previous_import_engine_can_be_reprocessed(service):
+    content = csv_bytes([row("REFRESH", "2026-10-01")])
+    first = upload(service, content)
+    service.commit(first["import_id"])
+    with service._connect() as conn:
+        conn.execute("UPDATE absence_import_batch SET engine_version='OLD_RULES' WHERE import_id=?", [first["import_id"]])
+    refreshed = upload(service, content)
+    assert not refreshed["duplicate_of_import_id"]
+    assert service.commit(refreshed["import_id"])["status"] == "COMMITTED"
+
+
 def test_missing_checkout_alone_does_not_require_confirmation(eabs_service):
     headers = EABS_HEADERS + ["NM_JABATAN"]
     batch = upload_eabs(eabs_service, [
@@ -719,6 +840,7 @@ def test_backend_commit_replaces_stale_legacy_import_stats(eabs_service):
     assert workflow["importStats"] == {
         "totalRaw": canonical_count,
         "totalRecord": canonical_count,
+        "nonAttendanceRows": 0,
         "rejectedRows": 0,
         "valid": canonical_count,
         "bermasalah": 0,

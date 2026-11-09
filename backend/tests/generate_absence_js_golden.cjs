@@ -18,7 +18,10 @@ for (const row of current.cases) {
   const previous = historical.cases.find(item => item.id === row.id);
   if (!row.normalized_input.cross_day) assert.deepEqual(row, previous, `Unrelated calculation changed: ${row.id}`);
   else if (row.normalized_input.check_in_effective != null && row.normalized_input.check_out_effective != null) {
-    for (const daily of row.daily) assert.equal(daily.totalHarian, 0, row.id);
+    for (const daily of row.daily) {
+      if (daily.metode === 'reguler') assert.equal(daily.totalHarian, 0, row.id);
+      else assert.equal(daily.totalHarian, daily.potDurasi, row.id);
+    }
   }
 }
 fs.writeFileSync(output, JSON.stringify(current, null, 2) + '\n', 'utf8');

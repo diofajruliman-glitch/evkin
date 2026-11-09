@@ -33,6 +33,7 @@ async function main() {
     queueMicrotask, FileReader:FakeFileReader, XLSX
   };
   vm.runInNewContext(fs.readFileSync('assets/js/utils.js', 'utf8'), sandbox);
+  vm.runInNewContext(fs.readFileSync('assets/js/calc.js', 'utf8'), sandbox);
   vm.runInNewContext(fs.readFileSync('assets/js/import.js', 'utf8'), sandbox);
   vm.runInNewContext(fs.readFileSync('assets/js/import-wali.js', 'utf8'), sandbox);
 
@@ -68,6 +69,21 @@ async function main() {
   assert.equal(validResult.dataObj.masukMin, 415);
   assert.equal(validResult.dataObj.pulangMin, 1191);
 
+  E.state.config = {
+    holidays:[], jabatanMaster:[{nama:'Wali Asuh', metode:'durasi'}],
+    masterPegawai:[{nip:validRow[0], nama:'Nama Master Berbeda', jabatan:'Guru'}],
+    jenisNoPotongan:[], leavePeriods:[], minDurasiJam:7.5
+  };
+  const sourceIdentity = {...validResult.dataObj, jabatan:'Wali Asuh'};
+  const calculationContext = E.calc.buildContext();
+  const importedDaily = E.calc.computeRecord(sourceIdentity, calculationContext, 'original');
+  assert.equal(importedDaily.nama, 'Pegawai 001', 'A matching master NIP must not replace the imported name');
+  assert.equal(importedDaily.jabatan, 'Wali Asuh');
+  assert.equal(importedDaily.metode, 'durasi');
+  assert.equal(importedDaily.totalHarian, 0);
+  assert.equal(E.calc.computeRecord({...sourceIdentity, nama:''}, calculationContext, 'original').nama, '',
+    'A blank imported name must stay blank rather than taking the master name');
+
   const persistedTextRow = ['202401230000000005', 'Pegawai 005', '46234', '0.288263888888889', '0.827013888888889'];
   const persistedTextResult = mod.processSingleRow(persistedTextRow, headers, colMap, { partial: true });
   assert.equal(persistedTextResult.dataObj.tanggal.key, U.parseDate(46234).key);
@@ -86,6 +102,45 @@ async function main() {
   const pulangKosong = mod.processSingleRow(rowPulangKosong, headers, colMap);
   assert.ok(masukKosong.dataObj.issues.some(i => i.includes('Jam masuk')));
   assert.ok(pulangKosong.dataObj.issues.some(i => i.includes('Jam pulang')));
+
+  const splitHeaders = ['NIP','Nama','Jabatan','Bulan','Tahun','Tanggal Masuk','Jam Masuk','Tanggal Pulang','Jam Pulang'];
+  const splitMap = mod.detectColumns(splitHeaders);
+  const outOnly = mod.processSingleRow(['SHIFT','Petugas','Wali Asuh',10,2026,'','','2026-11-01','07:00'], splitHeaders, splitMap);
+  assert.equal(outOnly.dataObj.tanggal.key, '2026-10-31', 'Checkout-only attendance belongs to the previous work date');
+  assert.equal(outOnly.dataObj.tanggalPulang, '01/11/2026');
+  assert.equal(outOnly.dataObj.crossDay, true);
+  assert.equal(outOnly.dataObj.masukMin, null, 'A missing check-in must stay missing');
+  for (const [checkout, workDate] of [
+    ['05:59:59', '2026-11-01'], ['06:00:00', '2026-10-31'],
+    ['08:59:59', '2026-10-31'], ['09:00:00', '2026-11-01'],
+    ['16:00:00', '2026-11-01'], ['', '2026-11-01'],
+    [8.999722222222223 / 24, '2026-10-31']
+  ]) {
+    const result = mod.processSingleRow(['BOUNDARY','Petugas','Wali Asuh',10,2026,'','','2026-11-01',checkout], splitHeaders, splitMap);
+    assert.equal(result.dataObj.tanggal.key, workDate, `Checkout ${checkout}: only 06:00–08:59 belongs to the previous work date`);
+    assert.equal(result.dataObj.crossDay, workDate === '2026-10-31');
+    assert.equal(result.dataObj.masukMin, null);
+  }
+  const explicitDate = mod.processSingleRow(['DATED','Petugas','Wali Asuh',10,2026,'2026-11-01','','2026-11-01','07:00'], splitHeaders, splitMap);
+  assert.equal(explicitDate.dataObj.tanggal.key, '2026-11-01', 'An explicit check-in date remains authoritative');
+  const noAttendanceRow = ['OFF','Petugas','Wali Asuh',10,2026,'','','',''];
+  const noAttendance = mod.processSingleRow(noAttendanceRow, splitHeaders, splitMap);
+  assert.equal(noAttendance.invalid, false, 'An undated row without punches is retained source data');
+  assert.equal(noAttendance.nonAttendance, true);
+  assert.equal(noAttendance.dataObj, null, 'No attendance date may be invented');
+  assert.equal(mod.processSingleRow(['','Petugas','Wali Asuh',10,2026,'','','',''], splitHeaders, splitMap).invalid, true);
+  assert.equal(mod.processSingleRow(['BAD','Petugas','Wali Asuh',10,2026,'bad','','',''], splitHeaders, splitMap).invalid, true);
+  const nonAttendanceStats = await mod.process([splitHeaders, noAttendanceRow]);
+  assert.equal(nonAttendanceStats.totalRaw, 1);
+  assert.equal(nonAttendanceStats.totalRecord, 0);
+  assert.equal(nonAttendanceStats.rejectedRows, 0);
+  assert.equal(nonAttendanceStats.nonAttendanceRows, 1);
+  const canonicalRaw = [
+    {nip:'SHIFT',nama:'Petugas',jabatan:'Wali Asuh',bulan:'2026-10',tanggal:'2026-10-31',jam_masuk:'',tanggal_pulang:'2026-11-01',jam_pulang:'07:00'},
+    {nip:'OFF',nama:'Petugas',jabatan:'Wali Asuh',bulan:'2026-10',tanggal:null,jam_masuk:'',tanggal_pulang:'',jam_pulang:''}
+  ];
+  assert.equal(mod.restoreRecords(canonicalRaw).length, 1, 'Raw source-only rows are intentionally absent from dated calculation input');
+  assert.equal(canonicalRaw.length, 2, 'Restoring records must not remove a retained source row');
 
   const fixturePath = 'backend/tests/fixtures/absensi_excel_time_fixture_600.csv';
   const fixtureRows = fs.readFileSync(fixturePath, 'utf8').trim().split(/\r?\n/).map(line => line.split(','));

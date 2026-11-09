@@ -45,7 +45,7 @@ from backend.runtime_guard import (
 )
 
 
-IMPORT_ENGINE_VERSION = "ABSENCE_IMPORT_BACKEND_V1_2026_09"
+IMPORT_ENGINE_VERSION = "ABSENCE_IMPORT_BACKEND_V1_2026_11_05"
 CSV_EABSENSI_ENGINE_VERSION = "CSV_EABSENSI_SPECIAL_2026_09_V1"
 CSV_EABSENSI_SOURCE_FORMAT = "csv_eabsensi"
 # Evidence-based default: the existing import contract permits an 18-hour
@@ -548,6 +548,19 @@ def _date_key(value: Any) -> str | None:
     return parsed["key"] if parsed else None
 
 
+def _row_reporting_period(row: dict[str, Any]) -> str | None:
+    values = {_header_norm(key): value for key, value in row.items()}
+    month = str(values.get("bulan") or "").strip()
+    if PERIOD_RE.fullmatch(month):
+        return month
+    year = str(values.get("tahun") or "").strip()
+    if re.fullmatch(r"\d{4}", year) and re.fullmatch(r"\d{1,2}", month):
+        candidate = f"{year}-{int(month):02d}"
+        if PERIOD_RE.fullmatch(candidate):
+            return candidate
+    return None
+
+
 def _canonical_stage_row(
     import_id: str,
     source_row: int,
@@ -555,6 +568,7 @@ def _canonical_stage_row(
     headers: list[str],
     mapping: dict[str, int],
     source_format: str,
+    reporting_period: str | None = None,
 ) -> tuple[Any, ...]:
     normalized = normalize_raw_row(row, headers, mapping, f"imp-{source_row:012d}")
     row_json = _json(row)
@@ -567,19 +581,26 @@ def _canonical_stage_row(
         return ""
 
     nip_raw = str(get("nip") or "").strip()
-    date = parse_date(get("tanggal")) or parse_date(get("tanggalPulang"))
+    date = normalized.get("tanggal") if normalized else (parse_date(get("tanggal")) or parse_date(get("tanggalPulang")))
     in_raw = get("jamMasuk")
     out_raw = get("jamPulang")
     in_time = parse_time(in_raw)
     out_time = parse_time(out_raw)
     errors: list[str] = []
     warnings: list[str] = []
+    row_period = _row_reporting_period(row) or (date["monthKey"] if date else reporting_period)
+    no_attendance = (
+        source_format == "standard" and row_period is not None
+        and not any(value is not None and str(value).strip() for value in (
+            get("tanggal"), get("tanggalPulang"), in_raw, out_raw,
+        ))
+    )
     if not nip_raw:
         errors.append("MISSING_NIP")
     elif not re.fullmatch(r"[A-Za-z0-9._/-]+", nip_raw):
         # Legacy accepts every non-blank NIP. Keep it promotable but visible.
         warnings.append("INVALID_NIP")
-    if not date:
+    if not date and not no_attendance:
         errors.append("INVALID_DATE")
     if in_raw is not None and str(in_raw).strip() and in_time is None:
         errors.append("INVALID_CHECK_IN")
@@ -594,8 +615,8 @@ def _canonical_stage_row(
             errors.append(code)
     if normalized is None:
         normalized = {}
-    issues = errors + warnings
-    severity = "BLOCKER" if errors else ("WARNING" if warnings else "ACCEPTED_LEGACY")
+    issues = errors + (["NO_ATTENDANCE_DATE"] if no_attendance else warnings)
+    severity = "BLOCKER" if errors else ("INFO" if no_attendance else ("WARNING" if warnings else "ACCEPTED_LEGACY"))
     date_key = date["key"] if date else None
     return (
         import_id, source_row, row_json, raw_hash,
@@ -612,7 +633,7 @@ def _canonical_stage_row(
         normalized.get("provinsi") or str(get("provinsi") or "").strip(),
         normalized.get("kabupaten") or str(get("kabupaten") or "").strip(),
         normalized.get("jenis") or str(get("jenis") or "").strip(),
-        source_format, date_key[:7] if date_key else None,
+        source_format, row_period,
         bool(normalized.get("crossDay")), False, not errors, severity,
         "[]" if not issues else _json(issues),
         # Normalized values already have typed columns beside raw_json.  Do not
@@ -1516,11 +1537,11 @@ class AbsenceImportService:
                     """SELECT import_id FROM absence_import_batch
                        WHERE import_id=? AND file_sha256=? AND source_format=?
                          AND coalesce(pair_cross_day,false)=? AND status='COMMITTED'
-                         AND period=?
+                         AND period=? AND engine_version=?
                        LIMIT 1""",
                     [active_import_id, digest.hexdigest(), source_format,
                      bool(pair_cross_day) if source_format == CSV_EABSENSI_SOURCE_FORMAT else False,
-                     active_period],
+                     active_period, CSV_EABSENSI_ENGINE_VERSION if source_format == CSV_EABSENSI_SOURCE_FORMAT else IMPORT_ENGINE_VERSION],
                 ).fetchone()
             initial_status = (
                 "ALREADY_COMMITTED"
@@ -1596,7 +1617,8 @@ class AbsenceImportService:
                                          [estimated_total, import_id])
                     batch_size = 5000
                     for count, row in enumerate(rows, 1):
-                        buffer.append(_canonical_stage_row(import_id, count, row, headers, mapping, source_format))
+                        buffer.append(_canonical_stage_row(import_id, count, row, headers, mapping, source_format,
+                                                           reporting_period=batch.get("period")))
                         if len(buffer) >= batch_size:
                             with self.write_gate:
                                 _insert_stage_buffer(conn, buffer)
@@ -1715,10 +1737,14 @@ class AbsenceImportService:
                     canonical_columns = {
                         "workflow_id", "import_id", "source_row", "nip", "nama", "jabatan", "tanggal",
                         "tanggal_pulang", "jam_masuk", "jam_pulang", "zona", "provinsi", "kabupaten",
-                        "jenis", "source_format", "raw_json", "file_sha256",
+                        "jenis", "source_format", "raw_json", "file_sha256", "bulan",
                     }
                     if _table_exists(conn, "raw_import"):
                         existing = {row[0].lower() for row in conn.execute('DESCRIBE "raw_import"').fetchall()}
+                        if existing == canonical_columns - {"bulan"}:
+                            conn.execute('ALTER TABLE raw_import ADD COLUMN bulan VARCHAR')
+                            conn.execute('UPDATE raw_import SET bulan=substr(tanggal,1,7)')
+                            existing.add("bulan")
                         if existing != canonical_columns:
                             legacy_count = int(conn.execute('SELECT count(*) FROM "raw_import"').fetchone()[0])
                             legacy_periods = _legacy_raw_import_periods(conn) if legacy_count else set()
@@ -1734,19 +1760,19 @@ class AbsenceImportService:
                               workflow_id VARCHAR,import_id VARCHAR,source_row BIGINT,nip VARCHAR,nama VARCHAR,
                               jabatan VARCHAR,tanggal VARCHAR,tanggal_pulang VARCHAR,jam_masuk VARCHAR,jam_pulang VARCHAR,
                               zona VARCHAR,provinsi VARCHAR,kabupaten VARCHAR,jenis VARCHAR,source_format VARCHAR,
-                              raw_json VARCHAR,file_sha256 VARCHAR
+                              raw_json VARCHAR,file_sha256 VARCHAR,bulan VARCHAR
                             )
                         """)
                     previous = conn.execute(
                         "SELECT import_id FROM absence_import_batch WHERE period=? AND status='COMMITTED' ORDER BY completed_at DESC LIMIT 1",
                         [selected],
                     ).fetchone()
-                    conn.execute("DELETE FROM raw_import WHERE substr(tanggal,1,7)=?", [selected])
+                    conn.execute("DELETE FROM raw_import WHERE coalesce(bulan,substr(tanggal,1,7))=?", [selected])
                     workflow_id = f"backend-import-{import_id}"
                     conn.execute("""
                         INSERT INTO raw_import
                         SELECT ?,?,source_row,nip,nama,jabatan,tanggal,tanggal_pulang,jam_masuk,jam_pulang,
-                               zona,provinsi,kabupaten,jenis,source_format,raw_json,?
+                               zona,provinsi,kabupaten,jenis,source_format,raw_json,?,period
                         FROM absence_import_staging
                         WHERE import_id=? AND period=? AND valid
                         ORDER BY source_row
@@ -1803,13 +1829,18 @@ class AbsenceImportService:
         workflow = dict(workflow or {})
         import_stats = workflow.get("importStats")
         import_stats = dict(import_stats) if isinstance(import_stats, dict) else {}
+        dated_rows = int(conn.execute(
+            'SELECT count(*) FROM raw_import WHERE import_id=? AND tanggal IS NOT NULL',
+            [batch["import_id"]],
+        ).fetchone()[0])
         # The uploaded config can belong to the previously active Legacy
         # workflow.  Never publish its row counts/months for the new backend
         # import: calculation-input treats these fields as the completeness
         # manifest for the canonical raw_import rows committed below.
         import_stats.update({
             "totalRaw": row_count,
-            "totalRecord": row_count,
+            "totalRecord": dated_rows,
+            "nonAttendanceRows": row_count - dated_rows,
             "rejectedRows": int(batch.get("invalid_rows") or 0),
             "valid": row_count,
             "bermasalah": int(batch.get("invalid_rows") or 0),
@@ -1836,6 +1867,10 @@ class AbsenceImportService:
             if not row:
                 raise KeyError(import_id)
             result = {item[0]: _json_value(value) for item, value in zip(cursor.description, row)}
+            result["non_attendance_rows"] = int(conn.execute(
+                "SELECT count(*) FROM absence_import_staging WHERE import_id=? AND valid AND severity='INFO' AND error_codes LIKE '%NO_ATTENDANCE_DATE%'",
+                [import_id],
+            ).fetchone()[0])
         for source, target, fallback in (("periods_json", "periods", []), ("timing_json", "timings", {})):
             try:
                 result[target] = json.loads(result.get(source) or "null") or fallback
@@ -1848,7 +1883,7 @@ class AbsenceImportService:
                 key: authoritative.get(key) for key in (
                     "import_id", "status", "period", "source_format", "pair_cross_day",
                     "total_rows", "valid_rows", "invalid_rows", "duplicate_rows",
-                    "invalid_time_rows", "cross_day_rows", "timings",
+                    "invalid_time_rows", "cross_day_rows", "non_attendance_rows", "timings",
                 )
             }
         return result
@@ -1976,6 +2011,7 @@ class AbsenceImportService:
         page_size = min(100, max(1, int(page_size)))
         page = max(1, int(page))
         where = "import_id=?" + (" AND severity IN ('BLOCKER','WARNING')" if errors_only else "")
+        order_by = "valid,source_row" if errors_only else "source_row"
         with self._connect() as conn:
             ensure_absence_import_schema(conn)
             total = conn.execute(f"SELECT count(*) FROM absence_import_staging WHERE {where}", [import_id]).fetchone()[0]
@@ -1983,7 +2019,7 @@ class AbsenceImportService:
                 SELECT source_row,nip,nama,jabatan,tanggal,tanggal_pulang,jam_masuk,jam_pulang,zona,
                        source_format,cross_day,duplicate_row,valid,severity,error_codes
                 FROM absence_import_staging WHERE {where}
-                ORDER BY source_row LIMIT ? OFFSET ?
+                ORDER BY {order_by} LIMIT ? OFFSET ?
             """, [import_id, page_size, (page - 1) * page_size])
             rows = [{item[0]: _json_value(value) for item, value in zip(cursor.description, values)}
                     for values in cursor.fetchall()]

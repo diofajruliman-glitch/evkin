@@ -86,10 +86,12 @@
     const nip = String(get('nip') || '').trim();
     const nama = String(get('nama') || '').trim();
     const jabatan = String(get('jabatan') || '').trim();
-    const dObj = U.parseDate(get('tanggal')) || U.parseDate(get('tanggalPulang'));
     const dPulang = colMap.tanggalPulang !== undefined ? U.parseDate(get('tanggalPulang')) : null;
     const masukValue = U.normalizeExcelTime(get('jamMasuk'));
     const pulangValue = U.normalizeExcelTime(get('jamPulang'));
+    const checkoutHour = Number(pulangValue.slice(0, 2));
+    const previousWorkDate = dPulang && !hasMeaningfulValue(get('tanggal')) && checkoutHour >= 6 && checkoutHour < 9;
+    const dObj = U.parseDate(get('tanggal')) || (previousWorkDate ? U.addDays(dPulang, -1) : dPulang);
     const masukMin = U.parseTime(masukValue);
     const pulangMin = U.parseTime(pulangValue);
     const provinsi = String(get('provinsi') || '').trim();
@@ -111,6 +113,9 @@
     if (dPulang && dObj && dPulang.key > dObj.key) crossDay = true;
     if (!crossDay && masukMin !== null && pulangMin !== null && pulangMin < masukMin) crossDay = true;
 
+    const nonAttendance = nip && !hasMeaningfulValue(get('tanggal')) && !hasMeaningfulValue(get('tanggalPulang')) &&
+      !hasMeaningfulValue(get('jamMasuk')) && !hasMeaningfulValue(get('jamPulang'));
+    if (nonAttendance) return { rawObj, dataObj:null, invalid:false, nonAttendance:true };
     if (!dObj || !nip) {
       return { rawObj, dataObj: null, invalid: true };
     }
@@ -242,15 +247,17 @@
   function processRows(rows, headers, colMap) {
       const raw = [];
       const data = [];
+      let nonAttendanceRows = 0;
       rows.forEach(r => {
           const result = mod.processSingleRow(r, headers, colMap);
         raw.push(result.rawObj);
         if (result.dataObj) data.push(result.dataObj);
+        if (result.nonAttendance) nonAttendanceRows++;
       });
-      return { raw, data };
+      return { raw, data, nonAttendanceRows };
   }
 
-  function finalizeRecords(raw, data, totalRaw) {
+  function finalizeRecords(raw, data, totalRaw, nonAttendanceRows = 0) {
     const grp = {};
     data.forEach(d => { const k = d.nip + '|' + d.tanggal.key; (grp[k] = grp[k] || []).push(d); });
     let dupGroups = 0;
@@ -260,12 +267,13 @@
     const dateKeys = data.map(d => d.tanggal.key).sort();
     const valid = data.filter(d => d.issues.length === 0).length;
     const invalidRows = data.filter(d => d.issues.length > 0).length;
-    const skipped = totalRaw - data.length;
+    const skipped = totalRaw - data.length - nonAttendanceRows;
 
     return {
       totalRaw,
       totalRecord: data.length,
       rejectedRows: skipped,
+      nonAttendanceRows,
       totalSDM: nipSet.size,
       rentang: dateKeys.length ? (dateKeys[0] + ' s/d ' + dateKeys[dateKeys.length - 1]) : '-',
       valid,
@@ -310,7 +318,7 @@
     validateColumnMap(colMap, headers);
     const parsed = processRows(raw.map(row => headers.map(key => row[key])), headers, colMap);
     const records = isSplitAttendanceFormat(colMap, headers) ? mergeWaliShiftRecords(parsed.data) : parsed.data;
-    finalizeRecords(raw, records, raw.length);
+    finalizeRecords(raw, records, raw.length, parsed.nonAttendanceRows);
     return records;
   };
 
@@ -325,7 +333,7 @@
     const raw = processed.raw;
     const data = processed.data;
 
-    const stats = finalizeRecords(raw, data, rows.length);
+    const stats = finalizeRecords(raw, data, rows.length, processed.nonAttendanceRows);
     return mod.applyImportResult(headers, raw, data, stats);
   };
 
@@ -344,6 +352,7 @@
     const data = [];
     const batchSize = mod.BATCH_SIZE;
     let index = 0;
+    let nonAttendanceRows = 0;
 
     return new Promise((resolve, reject) => {
       function runBatch() {
@@ -353,6 +362,7 @@
               const result = mod.processSingleRow(rows[index], headers, colMap);
             raw.push(result.rawObj);
             if (result.dataObj) data.push(result.dataObj);
+            if (result.nonAttendance) nonAttendanceRows++;
           }
 
           const progress = rows.length ? Math.round(index / rows.length * 100) : 100;
@@ -371,7 +381,7 @@
             return;
           }
 
-          const stats = finalizeRecords(raw, data, rows.length);
+          const stats = finalizeRecords(raw, data, rows.length, nonAttendanceRows);
           resolve(mod.applyImportResult(headers, raw, data, stats));
         } catch (err) {
           reject(err);

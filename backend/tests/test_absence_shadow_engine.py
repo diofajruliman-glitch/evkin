@@ -164,3 +164,65 @@ def test_wali_asuh_missing_punch_is_only_assessed_against_monthly_workday_target
     config["effectiveDaysManual"] = 3
     result = compute_rekap(rows, context)
     assert (result["hariAdaAbsensi"], result["hariKurang"], result["total"]) == (2, 1, 3)
+
+
+@pytest.mark.parametrize(("job", "method"), [("WALI ASUH", "durasi"), ("Guru SR", "reguler")])
+def test_undated_nonattendance_roster_uses_monthly_deficit_without_inventing_daily_dates(job, method):
+    config = load_json(FIXTURE)["config"]
+    config.update(effectiveDaysMode="manual", effectiveDaysManual=22)
+    context = build_context(config, [{"nip": "001", "jabatan": "Other Master Job"}])
+    result = compute_rekap([], context, roster={
+        "nip": "001", "nama": "Source Name", "jabatan": job, "bulan": "2026-10",
+    })
+    assert (result["jabatan"], result["metode"]) == (job, method)
+    assert result["jumlahRecord"] == result["jumlahHariAbsen"] == result["hariAdaAbsensi"] == 0
+    assert (result["hariEfektif"], result["hariKurang"]) == (22, 22)
+    assert result["potTidakLengkap"] == 0
+    assert result["potHariKurang"] == result["totalRaw"] == result["total"] == 66
+    assert "tanggalKey" not in result
+
+
+def test_undated_nonattendance_roster_respects_registered_leave_and_percentage_cap():
+    config = load_json(FIXTURE)["config"]
+    config.update(effectiveDaysMode="manual", effectiveDaysManual=40,
+                  leavePeriods=[{"nip": "001", "mulai": "2026-10-01", "selesai": "2026-10-02", "jenis": "Cuti"}])
+    result = compute_rekap([], build_context(config), roster={
+        "nip": "001", "nama": "Source Name", "jabatan": "Wali Asuh", "bulan": "2026-10",
+    })
+    assert (result["hariAdaAbsensi"], result["hariKurang"]) == (2, 38)
+    assert result["totalRaw"] == 114 and result["total"] == 100
+
+
+def test_calculate_source_preserves_source_jobs_and_uses_only_matching_nip_for_gross():
+    from backend.absence_cutover import calculate_source, validate_results
+
+    config = load_json(FIXTURE)["config"]
+    config.update(effectiveDaysMode="manual", effectiveDaysManual=2)
+    source = {
+        "period": "2026-10", "config": config, "time_mode": "original",
+        "records": [{"nip": "PRESENT", "nama": "Source Present", "jabatan": "Wali Asuh",
+                     "tanggal": parse_date("2026-10-01"), "masukMin": 480, "pulangMin": None,
+                     "zona": "WIB"}],
+        "nonattendance_records": [
+            {"nip": "PRESENT", "nama": "Source Present", "jabatan": "Wali Asuh", "period": "2026-10"},
+            {"nip": "ABSENT", "nama": "Source Absent", "jabatan": "Guru SR", "period": "2026-10"},
+            {"nip": "ABSENT", "nama": "Source Absent", "jabatan": "Guru SR", "period": "2026-10"},
+            {"nip": "NO-MASTER", "nama": "No Master", "jabatan": "Wali Asuh", "period": "2026-10"},
+        ],
+        "master": [
+            {"nip": "PRESENT", "nama": "Master must not replace source", "jabatan": "Guru SR", "tukin": 2_000_000},
+            {"nip": "ABSENT", "jabatan": "Wali Asuh", "tukin": 5_000_000},
+            {"nip": "UNRELATED", "nama": "No Master", "tukin": 9_000_000},
+        ],
+    }
+    results = calculate_source(source)
+    validate_results("2026-10", source, results)
+    assert len(results["daily"]) == 1 and len(results["rekap"]) == 3
+    assert results["daily"][0]["nama"] == "Source Present"
+    by_nip = {row["nip"]: row for row in results["rekap"]}
+    assert (by_nip["PRESENT"]["metode"], by_nip["PRESENT"]["hariKurang"], by_nip["PRESENT"]["total"]) == ("durasi", 1, 3)
+    assert (by_nip["ABSENT"]["jabatan"], by_nip["ABSENT"]["metode"], by_nip["ABSENT"]["total"]) == ("Guru SR", "reguler", 6)
+    final = {row["nip"]: row for row in results["final_absensi"]}
+    assert (final["PRESENT"]["tukin"], final["PRESENT"]["nominal"]) == (2_000_000, 18_000)
+    assert (final["ABSENT"]["tukin"], final["ABSENT"]["nominal"]) == (5_000_000, 90_000)
+    assert final["NO-MASTER"]["tukin"] is None and final["NO-MASTER"]["nominal"] is None

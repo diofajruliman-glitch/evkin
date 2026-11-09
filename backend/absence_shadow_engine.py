@@ -34,6 +34,12 @@ BASELINE_SOURCE_SHA256 = {
     "assets/js/app.js": "b90e9108a2558497e66450aad3ef8d2a1b3c3616e4ac4105d479f2631ba1b535",
 }
 BASELINE_GOLDEN_SHA256 = "15ac3c67be87436f8ea16867cf1ead1c467c7ddbcdfbde6f89bfaf0ec9f664d7"
+# Approved source-retention/checkout-date rules; historical hashes stay intact.
+IMPORT_SOURCE_SHA256_20261105 = {
+    "assets/js/calc.js": "026faab3014e14ce530b3af367d67f8ea117ff9f1d24319d2ffdaae730c6610f",
+    "assets/js/import.js": "c32dfde7022f9266f5092fb8ed0b59ee1d1ad961dd04357d1d7c8c3e42a2bd9f",
+    "assets/js/state.js": "f034f68bd0973a7dd5aa6160e47e0f289e2e03bac31a98ad39808f8869b52162",
+}
 
 MONTHS_ID = (
     "Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -300,10 +306,19 @@ def normalize_raw_row(row: dict[str, Any], headers: list[str], column_map: dict[
     values = [row.get(header) for header in headers]
     get = lambda field: values[column_map[field]] if field in column_map else ""
     nip = str(get("nip") or "").strip()
-    date = parse_date(get("tanggal")) or parse_date(get("tanggalPulang"))
-    out_date = parse_date(get("tanggalPulang")) if "tanggalPulang" in column_map else None
     check_in_raw = normalize_excel_time(get("jamMasuk"))
     check_out_raw = normalize_excel_time(get("jamPulang"))
+    in_date_raw = get("tanggal")
+    date = parse_date(in_date_raw)
+    out_date = parse_date(get("tanggalPulang")) if "tanggalPulang" in column_map else None
+    checkout_only_date = (
+        not str(in_date_raw or "").strip() and out_date is not None
+        and bool(check_out_raw) and 6 <= int(check_out_raw[:2]) < 9
+    )
+    if checkout_only_date:
+        date = add_days(out_date, -1)
+    elif date is None:
+        date = out_date
     check_in = parse_time(check_in_raw)
     check_out = parse_time(check_out_raw)
     issues: list[str] = []
@@ -503,11 +518,10 @@ def compute_record(record: dict[str, Any], context: CalculationContext, mode: st
     holiday = date["key"] in context.holiday_set or is_weekend(date)
     wali = record.get("sourceFormat") == "wali"
     holiday_label = context.holiday_names.get(date["key"], "Libur Nasional") if date["key"] in context.holiday_set else ("Akhir Pekan" if is_weekend(date) else "")
-    employee = context.employees.get(str(record.get("nip", "")).strip(), {})
     result: dict[str, Any] = {
         "_id": record.get("_id"),
         "nip": record.get("nip"),
-        "nama": employee.get("nama") or record.get("nama"),
+        "nama": record.get("nama"),
         "jabatan": job,
         "metode": method,
         "tanggal": date["str"],
@@ -594,13 +608,11 @@ def compute_record(record: dict[str, Any], context: CalculationContext, mode: st
     result["statusLengkap"] = "Lengkap"
     if wali:
         result["statusAbsensi"] = "LINTAS_HARI" if record.get("crossDay") else "NORMAL"
-    # Complete next-day attendance has no daily deduction; missing punches
-    # have already been handled above and remain subject to their own rule.
     if record.get("crossDay"):
         result["statusAbsensi"] = "LINTAS_HARI"
         if method == "reguler":
             result["_lateMin"] = result["_earlyMin"] = 0
-        return result
+            return result
     if method == "durasi":
         result["potDurasi"] = duration_tier_percentage(duration / 60, config)
     else:
@@ -649,8 +661,10 @@ def effective_days(month: str, context: CalculationContext) -> int | float:
     return len(effective_date_keys(month, context))
 
 
-def compute_rekap(records: list[dict[str, Any]], context: CalculationContext) -> dict[str, Any] | None:
-    if not records:
+def compute_rekap(
+    records: list[dict[str, Any]], context: CalculationContext, *, roster: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not records and not roster:
         raise ShadowEngineError("Belum ada hasil Hitung Harian.")
     seen: set[str] = set()
     for record in records:
@@ -658,7 +672,11 @@ def compute_rekap(records: list[dict[str, Any]], context: CalculationContext) ->
         if key in seen:
             raise DuplicateAttendanceError("Ada duplikat NIP/tanggal. Periksa dan koreksi di Semi Final sebelum Rekap.")
         seen.add(key)
-    first = records[0]
+    if records:
+        first = records[0]
+    else:
+        job = resolve_job(roster, context)
+        first = {**roster, "jabatan": job, "metode": method_of(job, context)}
     month = first.get("monthKey") or first.get("bulan") or str(first.get("tanggalKey") or "")[:7]
     present_rows = [row for row in records if row.get("jamMasuk") or row.get("jamPulang")]
     date_keys = {row.get("tanggalKey") for row in present_rows}
@@ -690,6 +708,9 @@ def compute_rekap(records: list[dict[str, Any]], context: CalculationContext) ->
     if first.get("metode") == "durasi":
         included_missing = missing_deduction if attendance_days < days else 0
         total_raw = js_round2(sum_late + sum_early + sum_duration + included_missing)
+    elif not records:
+        # Undated roster entries have no daily penalty to duplicate.
+        total_raw = missing_deduction
     else:
         total_raw = js_round2(sum_late + sum_early + sum_incomplete)
     total = min(100, total_raw)
@@ -883,7 +904,7 @@ def validate_source_fingerprint(repo_root: str | Path) -> dict[str, Any]:
     root = Path(repo_root)
     differences = []
     actual = {}
-    for relative, expected in BASELINE_SOURCE_SHA256.items():
+    for relative, expected in {**BASELINE_SOURCE_SHA256, **IMPORT_SOURCE_SHA256_20261105}.items():
         path = root / relative
         digest = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest() if path.exists() else None
         actual[relative] = digest
